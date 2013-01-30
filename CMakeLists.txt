@@ -1,5 +1,8 @@
 project(libwebqq)
 cmake_minimum_required(VERSION 2.6)
+set(VERSION_MAJOR "0")
+set(VERSION_MINOR "1")
+set(VERSION_PATCH "b")
 
 set(CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/cmake ${CMAKE_MODULE_PATH})
 if(NOT CMAKE_INSTALL_PREFIX)
@@ -13,6 +16,7 @@ pkg_check_modules(CURL REQUIRED libcurl)
 pkg_check_modules(SQLITE REQUIRED sqlite3)
 #recommand libcurl>=7.22.0
 
+add_definitions(-Wall)
 
 EXEC_PROGRAM("pkg-config --variable=plugindir purple 2>/dev/null"
     OUTPUT_VARIABLE LIB_INSTALL_DIR)
@@ -29,17 +33,25 @@ if(NLS)
   find_package(Gettext)
 endif(NLS)
 
+option(WITH_LIBEV "build in libev for async process" On)
+
+if(WITH_LIBEV)
+    find_package(EV REQUIRED)
+endif(WITH_LIBEV)
+
+if(VERBOSE)
+    add_definitions(-DLWQQ_VERBOSE_LEVEL=${VERBOSE})
+else(VERBOSE)
+    add_definitions(-DLWQQ_VERBOSE_LEVEL=0)
+endif(VERBOSE)
+
 add_subdirectory(src)
 add_subdirectory(res)
 
-option(WITH_LIBEV "build in libev for async process" Off)
-if(WITH_LIBEV)
-    find_package(Ev)
-endif(WITH_LIBEV)
-
 option(UOA "ubuntu online account support" Off)
 if(UOA)
-    pkg_check_modules(GTK gtk+-3.0)
+    pkg_check_modules(AP REQUIRED account-plugin)
+    pkg_check_modules(GTK REQUIRED gtk+-3.0)
     EXEC_PROGRAM("pkg-config --variable=provider_plugindir account-plugin 2>/dev/null"
         OUTPUT_VARIABLE PLUGIN_INSTALL_DIR)
     #set the rpath for account-plugin.

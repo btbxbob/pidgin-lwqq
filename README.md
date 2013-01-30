@@ -3,36 +3,43 @@ pidgin-lwqq
 
 Intro
 -----
-
-a pidgin plugin based on lwqq, a excellent safe useful library for webqq protocol.   
-see github:https://github.com/mathslinux/lwqq.
+ provide qq protocol for pidgin on linux. based on webqq service.  
+ a pidgin plugin based on [lwqq](https://github.com/mathslinux/lwqq).
+ a excellent compact useful library for webqq protocol.   
+ since the name may confused. lwqq is linux webqq
 
 License: GPLv3
 
 
-Build Option
-------------
+Quick Install
+-------------
 
 ### Building From Source
-
-    cmake ..
+    cmake .. 
     make
     sudo make install
 
-### Building With Ubuntu-Account-Online Support
-
+### Building With Ubuntu-Online-Account Support
     cmake .. -DUOA=On
     make
     sudo make install
 
-### Building With libev Support (Optional)
+Build Option
+------------
 
-put all http io waiting to another thread.
-avoid block main ui thread.so it can be very smoothly.
+- UOA[=Off] 
+> Ubuntu-Account-Online Support
 
-    cmake .. -DWITH_LIBEV=On
-    make
-    sudo make install
+- WITH_LIBEV[=On]
+> enable libev .  
+  put all http io waiting to libev thread.
+  avoid block main ui thread. so would be smoothly.
+
+- VERBOSE[=0]
+> set the verbose level .0 means no verbose,3 means max verbose.
+
+See [wiki](https://github.com/xiehuc/pidgin-lwqq/wiki) for the detail install guide.
+
 
 ### Notice
 
@@ -46,19 +53,21 @@ Function list
 * send / recv buddy|group|discu messages
 * send / recv picture messages
 * send / recv qq face (you should use webqq faces theme in settings)
+* send / recv input notify | shake message
+* change buddy|group|discu markname
 * avatar
-* change buddy markname
 * change buddy category
 * confirm buddy added request
 * visit buddy qzone
 * group whisper message
-* change status
+* change status/business card
 * support multi webqq account
 * support send/recv offline file
 * support font style
 * support block group message
 * support recv file trans
 * support local qqnumber cache
+* support add friend/group
 
 ### empathy support (via telepathy-haze)
 
@@ -67,27 +76,22 @@ Function list
 * **not** support local qqnumber cache
 
 
-known issue
+Known Issue
 -----------
 
 * send picture abnormal when libcurl < = 7.22.0
+* telepathy-haze itself doesn't support group or picture.
+* telepathy-haze store buddy list on /tmp/haze-XXX.
+  every time startup recreate every thing.
 
-*telepathy-haze itself doesn't support group or picture.*
+简  介
+-----
+为linux的pidgin提供qq协议,基于webqq服务.
+是在[lwqq](https://github.com/mathslinux/lwqq)基础上开发而来.
+lwqq库是一个非常严谨有效的webqq协议的库.  
+lwqq 即是 linux webqq 之意
 
-**NOTE:**
-telepathy-haze never store buddy list!!
-It only saves file in /tmp/haze-XXXXXX
-so never want to enjoy a good speed
-
-简介
-----
-
-一个基于lwqq库的pidgin插件.  
-lwqq库是一个非常安全有效的webqq协议的库.  
-见github:https://github.com/mathslinux/lwqq  
-*推荐libcurl 版本高于等于 7.22*
-
-编译选项
+快速安装
 --------
 
 ### 从源代码编译
@@ -102,7 +106,14 @@ lwqq库是一个非常安全有效的webqq协议的库.
     make
     sudo make install
 
-### 编译 libev 支持(可选)
+### 编译选项
+- UOA[=Off] 
+> Ubuntu-Account-Online Support
+
+- WITH_LIBEV[=On]
+> enable libev .  
+  put all http io waiting to libev thread.
+  avoid block main ui thread. so would be smoothly.
 
 将全部的http io等待放到一个单独的线程中.
 避免卡UI线程.能够提高程序的响应和体验.
@@ -120,19 +131,21 @@ lwqq库是一个非常安全有效的webqq协议的库.
 * 支持发送接受 好友|群|讨论组 消息
 * 支持发送接受图片
 * 支持发送接受表情(在设置中使用webqq表情主题)
+* 支持发送接受 输入提示|窗口摇动
+* 支持设置 好友|群|讨论组 备注
 * 支持头像
-* 支持设置好友备注
 * 支持更改好友分组
 * 支持确认添加好友请求
 * 支持群的临时会话
 * 支持访问QQ空间
-* 支持更改在线状态
+* 支持更改在线状态|群名片
 * 支持多账户登录
 * 支持发送接受离线文件
 * 支持文本样式
 * 支持群消息屏蔽
 * 支持接受文件传输
 * 支持本地QQ号缓存机制
+* 支持添加好友|群
 
 ### empathy support (via telepathy-haze)
 
