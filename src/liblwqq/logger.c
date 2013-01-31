@@ -35,22 +35,32 @@ static char *levels[] = {
 void lwqq_log(int level, const char *file, int line,
               const char *function, const char* msg, ...)
 {
-    char buf[1600] = {0};
+
+    char buf[128] = {0};
 	va_list  va;
 	time_t  t = time(NULL);
 	struct tm *tm;
-	int buf_used = 0;
 	char date[256];
 
 	tm = localtime(&t);
 	strftime(date, sizeof(date), "%b %e %T", tm);
 	
-	snprintf(buf, sizeof(buf), "[%s] %s[%ld]: %s:%d %s: \n\t", date, levels[level], (long)getpid(), file, line, function);
-	buf_used = strlen(buf);
-	va_start (va, msg);
-	vsnprintf(buf + buf_used , sizeof(buf) - buf_used, (char*)msg, va);
-	va_end(va);
+    if(level > 1){
+        snprintf(buf, sizeof(buf), "[%s] %s[%ld]: %s:%d %s: \n\t", date, levels[level], (long)getpid(), file, line, function);
+        fprintf(stderr,"%s",buf);
+    }
 
-	fprintf(stderr, "%s", buf);
+    //support long long msg printout
+	va_start (va, msg);
+    vfprintf(stderr,msg,va);
+	va_end(va);
 }
 
+const char* lwqq_log_time()
+{
+    static char tm_str[64];
+    time_t t_ = time(NULL);
+    struct tm *tm_ = localtime(&t_);
+    strftime(tm_str,sizeof(tm_str),"%X",tm_);
+    return tm_str;
+}

@@ -1,15 +1,13 @@
 set(SRC_LIST
-  background.c
   trex.c
   webqq.c
   translate.c
   qq_types.c
   ft.c
+  remote.c
   )
 
 set(LWQQ_LIST
-  liblwqq/async.c
-  liblwqq/http_curl.c
   liblwqq/url.c
   liblwqq/md5.c
   liblwqq/unicode.c
@@ -22,14 +20,18 @@ set(LWQQ_LIST
   liblwqq/info.c
   liblwqq/lwdb.c
   liblwqq/swsqlite.c
+  liblwqq/vplist.c
+  liblwqq/util.c
+  liblwqq/internal.c
+  liblwqq/async.c
+  liblwqq/http.c
   )
 
 add_definitions(-Wall)
 
-
 ADD_LIBRARY(webqq MODULE
-    ${SRC_LIST}
     ${LWQQ_LIST}
+    ${SRC_LIST}
     )
 include_directories(
   ${PURPLE_INCLUDE_DIRS}
@@ -39,10 +41,12 @@ include_directories(
 if(WITH_LIBEV)
     add_definitions(-DUSE_LIBEV)
     include_directories(${EV_INCLUDE_DIRS})
-    target_link_libraries(webqq ${EV_LIBRARY})
+    target_link_libraries(webqq ${EV_LIBRARIES})
 else(WITH_LIBEV)
     add_definitions(-DUSE_LIBPURPLE)
 endif(WITH_LIBEV)
+
+set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} -DUSE_DEBUG=1 -Wno-unused-function")
 
 target_link_libraries(webqq
   ${SQLITE_LIBRARIES}

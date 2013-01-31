@@ -12,30 +12,56 @@
 #define LWQQ_TYPE_H
 
 #include <pthread.h>
+#include <stdarg.h>
 #include "queue.h"
+#include "vplist.h"
 #define LWQQ_MAGIC 0x4153
+
+#define USE_MSG_THREAD 1
+
+#ifndef USE_DEBUG
+#define USE_DEBUG 0
+#endif
+
+#define LWQQ_DEFAULT_CATE "My Friends"
 
 typedef struct _LwqqAsyncEvent LwqqAsyncEvent;
 typedef struct _LwqqAsyncEvset LwqqAsyncEvset;
 typedef struct _LwqqAsyncOption LwqqAsyncOption;
-typedef struct _LWQQ_HTTP_HANDLE LWQQ_HTTP_HANDLE;
-typedef struct _LwqqClient LwqqClient;
-typedef int (*DISPATCH_FUNC)(LwqqClient* lc,void* data);
+typedef struct _LwqqHttpRequest LwqqHttpRequest;
+//typedef struct _LwqqClient LwqqClient;
+typedef LIST_HEAD(,LwqqAsyncEntry) LwqqAsyncQueue;
+
+
+typedef VP_DISPATCH DISPATCH_FUNC;
+typedef VP_CALLBACK CALLBACK_FUNC;
+typedef vp_command  LwqqCommand;
+#define _F_(f) (CALLBACK_FUNC)f
+#define _C_2(d,c,...) vp_make_command(vp_func_##d,_F_(c),__VA_ARGS__)
+#define _C_(d,c,...) _C_2(d,c,__VA_ARGS__)
+#define _P_2(d,...) vp_make_params(vp_func_##d,__VA_ARGS__)
+#define _P_(d,...) _P_2(d,__VA_ARGS__)
 //return zero means continue.>1 means abort
 typedef int (*LWQQ_PROGRESS)(void* data,size_t now,size_t total);
 /************************************************************************/
-/* Struct defination */
 
+//=========================INSTRUCTION=================================//
+/**
+ * LWQQ head is defined local enum
+ * WEBQQ head is defined server enum
+ * that is it's value same as Server
+ *
+ * there are some old LWQQ head that should be WEBQQ
+ */
 
-typedef struct LwqqFriendCategory {
-    int index;
-    int sort;
-    char *name;
-    int count;
-    LIST_ENTRY(LwqqFriendCategory) entries;
-} LwqqFriendCategory;
-typedef enum LWQQ_STATUS{
-    LWQQ_STATUS_UNKNOW = 0,
+typedef enum {
+    LWQQ_CALLBACK_FAILED = 0x0,
+    LWQQ_CALLBACK_VALID,
+    LWQQ_CALLBACK_TIMEOUT,
+    LWQQ_CALLBACK_CANCELED,
+}LwqqCallbackCode;
+typedef enum {
+    LWQQ_STATUS_LOGOUT = 0,
     LWQQ_STATUS_ONLINE = 10,
     LWQQ_STATUS_OFFLINE = 20,
     LWQQ_STATUS_AWAY = 30,
@@ -43,12 +69,62 @@ typedef enum LWQQ_STATUS{
     LWQQ_STATUS_BUSY = 50,
     LWQQ_STATUS_CALLME = 60,
     LWQQ_STATUS_SLIENT = 70
-}LWQQ_STATUS;
-typedef enum LWQQ_CTYPE{
+}LwqqStatus;
+typedef enum {
     LWQQ_CLIENT_DESKTOP=1,
     LWQQ_CLIENT_MOBILE=21,
     LWQQ_CLIENT_WEBQQ=41,
-}LWQQ_CTYPE;
+}LwqqClientType;
+typedef enum { 
+    LWQQ_MASK_NONE = 0,
+    LWQQ_MASK_1 = 1,
+    LWQQ_MASK_ALL=2 
+}LwqqMask;
+typedef enum {
+    LWQQ_MEMBER_IS_ADMIN = 0x1,
+}LwqqMemberFlags;
+typedef enum {
+    LWQQ_DEL_FROM_OTHER = 2/* delete buddy and remove myself from other buddy list */
+}LwqqDelFriendType;
+
+typedef enum {
+    WEBQQ_OK = 0,
+    WEBQQ_NO_MESSAGE = 102,
+    WEBQQ_108 = 108,
+    WEBQQ_NEW_PTVALUE = 116,
+    WEBQQ_LOST_CONN = 121,
+    WEBQQ_FATAL = 100000
+}WebqqRetCode;
+
+typedef enum {
+    LWQQ_FEMALE = 1,
+    LWQQ_MALE = 2
+}LwqqGender;
+/* Lwqq Error Code */
+typedef enum {
+    LWQQ_EC_ERROR = -1,                 //<general error
+    //old uncleard api
+    LWQQ_EC_OK = 0,
+    LWQQ_EC_NULL_POINTER,
+    LWQQ_EC_FILE_NOT_EXIST,
+    LWQQ_EC_LOGIN_NEED_VC = 10,
+    LWQQ_EC_LOGIN_ABNORMAL = 60,///<登录需要解禁
+    LWQQ_EC_NETWORK_ERROR = 20,
+    LWQQ_EC_HTTP_ERROR = 30,
+    LWQQ_EC_DB_EXEC_FAIELD = 50,
+    LWQQ_EC_DB_CLOSE_FAILED,
+    LWQQ_EC_NO_RESULT,
+    LWQQ_EC_TIMEOUT_OVER
+} LwqqErrorCode;
+
+/* Struct defination */
+typedef struct LwqqFriendCategory {
+    int index;
+    int sort;
+    char *name;
+    int count;
+    LIST_ENTRY(LwqqFriendCategory) entries;
+} LwqqFriendCategory;
 
 /* QQ buddy */
 typedef struct LwqqBuddy {
@@ -63,7 +139,6 @@ typedef struct LwqqBuddy {
     char *constel;
     char *blood;
     char *homepage;
-    LWQQ_STATUS stat;                 /** 10:online 20:offline 30:away 50:busy 70:请勿打扰*/
     char *country;
     char *city;
     char *personal;
@@ -76,49 +151,35 @@ typedef struct LwqqBuddy {
     char *mobile;
     char *vip_info;
     char *markname;
-
+    LwqqStatus stat;
+    LwqqClientType client_type;
+    time_t birthday;
     char *flag;
-
+    int cate_index;           /**< Index of the category */
+    //extra data
     char *avatar;
     size_t avatar_len;
-
-    char *cate_index;           /**< Index of the category */
-
-    /*
-     * 1 : Desktop client
-     * 21: Mobile client
-     * 41: Web QQ Client
-     */
-    LWQQ_CTYPE client_type;
-
-
-    int ref;
-    pthread_mutex_t mutex;
+    char *token;                /**< Only used in add friend */
+    void *data;                 /**< user defined data */
+    short page;
+    //pthread_mutex_t mutex;
     LIST_ENTRY(LwqqBuddy) entries; /* FIXME: Do we really need this? */
 } LwqqBuddy;
-enum LWQQ_FLAG_ENUM{
-    LWQQ_MEMBER_IS_ADMIN = 0x1,
-};
-typedef int LWQQ_FLAG;
+typedef LIST_HEAD(LwqqFriendList,LwqqBuddy) 
+    LwqqFriendList;
 typedef struct LwqqSimpleBuddy{
     char* uin;
     char* qq;
     char* nick;
     char* card;                 /* 群名片 */
-    LWQQ_CTYPE client_type;
-    //char* stat;
-    LWQQ_STATUS stat;
-    LWQQ_FLAG mflag;
+    LwqqClientType client_type;
+    LwqqStatus stat;
+    LwqqMemberFlags mflag;
     char* cate_index;
     char* group_sig;            /* only use at sess message */
     LIST_ENTRY(LwqqSimpleBuddy) entries;
 }LwqqSimpleBuddy;
 
-typedef enum LWQQ_MASK{ 
-    LWQQ_MASK_NONE = 0,
-    LWQQ_MASK_1 = 1,
-    LWQQ_MASK_ALL=2 
-}LWQQ_MASK;
 /* QQ group */
 typedef struct LwqqGroup {
     enum{
@@ -142,20 +203,22 @@ typedef struct LwqqGroup {
     char *memo;
     char *class;
     char *fingermemo;
-    char *createtime;
+    time_t createtime;
     char *level;
     char *owner;                 /** < owner's QQ number  */
     char *flag;
     char *option;
-    LWQQ_MASK mask;             /** < group mask */
+    LwqqMask mask;             /** < group mask */
 
     char *group_sig;            /** < use in sess msg */
 
     char *avatar;
     size_t avatar_len;
+    void *data;                 /** < user defined data */
 
     LIST_ENTRY(LwqqGroup) entries;
     LIST_HEAD(, LwqqSimpleBuddy) members; /** < QQ Group members */
+    LwqqAsyncQueue ev_queue;
 } LwqqGroup;
 #define lwqq_member_is_founder(member,group) (strcmp(member->uin,group->owner)==0)
 #define lwqq_group_is_qun(group) (group->type==LWQQ_GROUP_QUN)
@@ -167,8 +230,13 @@ typedef struct LwqqVerifyCode {
     char *img;
     char *uin;
     char *data;
+    char *verifysession;
     size_t size;
+    LwqqCommand cmd;
 } LwqqVerifyCode ;
+
+typedef enum {LWQQ_NO,LWQQ_YES} LwqqAnswer;
+typedef enum {LWQQ_DENY,LWQQ_ALLOW,LWQQ_ALLOW_AND_ADD} LwqqAllow;
 
 typedef struct LwqqCookies {
     char *ptvfsession;          /**< ptvfsession */
@@ -180,10 +248,11 @@ typedef struct LwqqCookies {
     char *ptisp;
     char *pt2gguin;
     char *verifysession;
+    char *RK;
     char *lwcookies;
 } LwqqCookies;
 /* LwqqClient API */
-struct _LwqqClient {
+typedef struct LwqqClient {
     char *username;             /**< Username */
     char *password;             /**< Password */
     LwqqBuddy *myself;          /**< Myself */
@@ -201,41 +270,32 @@ struct _LwqqClient {
     char *gface_sig;                  /**<use at cfage */
     const LwqqAsyncOption* async_opt;
     LwqqCookies *cookies;
-    const char *status;
-    LWQQ_STATUS stat;
-    char *error_description;
-    //LWQQ_HTTP_HANDLE* http_handle;
 
-    LIST_HEAD(, LwqqBuddy) friends; /**< QQ friends */
+    LwqqStatus stat;
+    char *error_description;
+    char *new_ptwebqq;              /**< this only used when relogin */
+
+    LwqqFriendList friends; /**< QQ friends */
     LIST_HEAD(, LwqqFriendCategory) categories; /**< QQ friends categories */
     LIST_HEAD(, LwqqGroup) groups; /**< QQ groups */
     LIST_HEAD(, LwqqGroup) discus; /**< QQ discus */
     struct LwqqRecvMsgList *msg_list;
     long msg_id;            /**< Used to send message */
 
-    void* data;                     /**< user defined data*/
+    LwqqAsyncQueue ev_queue;
 
-    LwqqBuddy* (*find_buddy_by_uin)(LwqqClient* lc,const char* uin);
-    LwqqBuddy* (*find_buddy_by_qqnumber)(LwqqClient* lc,const char* qqnumber);
-    void (*dispatch)(LwqqClient* lc,DISPATCH_FUNC func,void* param);
+    LwqqBuddy* (*find_buddy_by_uin)(struct LwqqClient* lc,const char* uin);
+    LwqqBuddy* (*find_buddy_by_qqnumber)(struct LwqqClient* lc,const char* qqnumber);
+
+    /** non data area **/
+
+    void* data;                     /**< user defined data*/
+    void (*dispatch)(DISPATCH_FUNC,CALLBACK_FUNC,...);
 
     int magic;          /**< 0x4153 **/
-} ;
+} LwqqClient;
 #define lwqq_client_userdata(lc) (lc->data)
 
-/* Lwqq Error Code */
-typedef enum {
-    LWQQ_EC_OK,
-    LWQQ_EC_ERROR,
-    LWQQ_EC_NULL_POINTER,
-    LWQQ_EC_FILE_NOT_EXIST,
-    LWQQ_EC_LOGIN_NEED_VC = 10,
-    LWQQ_EC_LOGIN_ABNORMAL = 60,///<登录需要解禁
-    LWQQ_EC_NETWORK_ERROR = 20,
-    LWQQ_EC_HTTP_ERROR = 30,
-    LWQQ_EC_DB_EXEC_FAIELD = 50,
-    LWQQ_EC_DB_CLOSE_FAILED,
-} LwqqErrorCode;
 
 /* Struct defination end */
 
@@ -252,6 +312,7 @@ typedef enum {
 LwqqClient *lwqq_client_new(const char *username, const char *password);
 
 #define lwqq_client_valid(lc) (lc!=0&&lc->magic==LWQQ_MAGIC)
+#define lwqq_client_logined(lc) (lc->stat != LWQQ_STATUS_LOGOUT)
 
 /** 
  * Get cookies needby by webqq server
@@ -262,6 +323,7 @@ LwqqClient *lwqq_client_new(const char *username, const char *password);
  */
 const char *lwqq_get_cookies(LwqqClient *lc);
 
+void lwqq_set_cookie(LwqqCookies* ,const char* key,const char* value);
 /** 
  * Free LwqqVerifyCode object
  * 
@@ -312,6 +374,9 @@ void lwqq_simple_buddy_free(LwqqSimpleBuddy* buddy);
 LwqqBuddy *lwqq_buddy_find_buddy_by_uin(LwqqClient *lc, const char *uin);
 LwqqBuddy *lwqq_buddy_find_buddy_by_qqnumber(LwqqClient *lc, const char *qqnumber);
 
+
+LwqqFriendCategory* lwqq_category_find_by_name(LwqqClient* lc,const char* name,const char* def_name);
+
 /* LwqqBuddy API END*/
 
 
@@ -340,6 +405,7 @@ LwqqGroup *lwqq_group_new(int type);
  * @return A LwqqGroup instance
  */
 LwqqGroup *lwqq_group_find_group_by_gid(LwqqClient *lc, const char *gid);
+LwqqGroup* lwqq_group_find_group_by_qqnumber(LwqqClient* lc,const char* qqnumber);
 
 /** 
  * Find group member object by member's uin
@@ -358,6 +424,9 @@ snprintf(str+strlen(str),sizeof(str)-strlen(str),##format)
 
 /************************************************************************/
 
-const char* lwqq_status_to_str(LWQQ_STATUS status);
-LWQQ_STATUS lwqq_status_from_str(const char* str);
+const char* lwqq_status_to_str(LwqqStatus status);
+LwqqStatus lwqq_status_from_str(const char* str);
+
+
+
 #endif  /* LWQQ_TYPE_H */

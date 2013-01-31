@@ -1,5 +1,29 @@
 pidgin-lwqq : the webqq protocol for pidgin based on lwqq.
 author : xiehuc@gmail.com
+dev (01/26/2013):
+	* new feature: support chat topic
+	* new feature: support change group/discu markname
+	
+dev (01/25/2013):
+	* new feature: support long nick
+
+dev (01/24/2013):
+	* enhancement: file transport enhanced
+
+dev (01/13/2013):
+	* new feature: change self business card for group.
+
+dev (01/10/2013):
+	* enhancement: add timeout retry 3 times.
+
+dev (01/07/2013):
+	* enhancement: slow down cpu rate by add libev time interval
+	* new feature: add group
+
+dev (01/06/2013):
+	* new feature: add friend
+	* new feature: less lost connection
+	* enhancement: refine original old api
 
 dev (11/24/2012):
 	* new feature: add fast index to speed up qqnumber/uin lookup

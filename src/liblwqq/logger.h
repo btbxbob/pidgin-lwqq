@@ -27,6 +27,10 @@
 #define __LOG_ERROR		3
 #define LOG_ERROR		__LOG_ERROR, _A_
 
+#ifndef LWQQ_VERBOSE_LEVEL
+#define LWQQ_VERBOSE_LEVEL 0
+#endif
+
 /** 
  * This is standard logger function
  * 
@@ -38,8 +42,18 @@
  */
 void lwqq_log(int level, const char *file, int line,
               const char *function, const char* msg, ...);
-
-#define lwqq_puts(str) fprintf(stderr,"%s\n",str);
+const char* lwqq_log_time();
+#define TIME_ lwqq_log_time()
+/**============VERBOSE LEVEL=============**/
+/* 0        No Verbose
+ * 1        Normal Verbose
+ * 2        Poll Verbose
+ * 3        Request Verbose
+ * 4        Timeout Verbose
+ * 5        Extra Verbose
+ */
+#define lwqq_verbose(l,str,...) if(l<=LWQQ_VERBOSE_LEVEL) fprintf(stderr,str,__VA_ARGS__)
+#define lwqq_puts(str) lwqq_verbose(1,"%s\n",str)
 
 
 #endif  /* LWQQ_LOGGER_H */
