@@ -16,27 +16,49 @@
 #include "type.h"
 
 typedef enum LwqqMsgType {
-    LWQQ_MT_BUDDY_MSG = 0,
-    LWQQ_MT_GROUP_MSG,
-    LWQQ_MT_DISCU_MSG,
-    LWQQ_MT_SESS_MSG, //group whisper message
-    LWQQ_MT_STATUS_CHANGE,
-    LWQQ_MT_KICK_MESSAGE,
-    LWQQ_MT_SYSTEM,
-    LWQQ_MT_BLIST_CHANGE,
-    LWQQ_MT_SYS_G_MSG,
-    LWQQ_MT_OFFFILE,
-    LWQQ_MT_FILETRANS,
-    LWQQ_MT_FILE_MSG,
-    LWQQ_MT_NOTIFY_OFFFILE,
-    LWQQ_MT_INPUT_NOTIFY,
+    LWQQ_MF_SEQ = 1<<1,
+    LWQQ_MT_MESSAGE = 1<<3|LWQQ_MF_SEQ,
+    LWQQ_MS_BUDDY_MSG = LWQQ_MT_MESSAGE|(1<<8),
+    LWQQ_MS_GROUP_MSG = LWQQ_MT_MESSAGE|(2<<8),
+    LWQQ_MS_DISCU_MSG = LWQQ_MT_MESSAGE|(3<<8),
+    LWQQ_MS_SESS_MSG = LWQQ_MT_MESSAGE|(4<<8), //group whisper message
+
+    LWQQ_MT_STATUS_CHANGE = 2<<3,
+    LWQQ_MT_KICK_MESSAGE = 3<<3,
+    LWQQ_MT_SYSTEM = LWQQ_MF_SEQ|(4<<3),
+    LWQQ_MS_ADD_BUDDY = LWQQ_MT_SYSTEM|(1<<8),
+    LWQQ_MS_VERIFY_PASS = LWQQ_MT_SYSTEM|(2<<8),
+    LWQQ_MS_VERIFY_PASS_ADD = LWQQ_MT_SYSTEM|(3<<8),
+    LWQQ_MS_VERIFY_REQUIRE = LWQQ_MT_SYSTEM|(4<<8),
+
+    LWQQ_MT_BLIST_CHANGE = 5<<3,
+    LWQQ_MT_SYS_G_MSG = LWQQ_MF_SEQ|(6<<3),
+    LWQQ_MS_G_CREATE = LWQQ_MT_SYS_G_MSG|(1<<8),
+    LWQQ_MS_G_JOIN = LWQQ_MT_SYS_G_MSG|(2<<8),
+    LWQQ_MS_G_LEAVE = LWQQ_MT_SYS_G_MSG|(3<<8),
+    LWQQ_MS_G_REQUIRE = LWQQ_MT_SYS_G_MSG|(4<<8),
+
+    LWQQ_MT_OFFFILE = LWQQ_MF_SEQ|(7<<3),
+    LWQQ_MT_FILETRANS = LWQQ_MF_SEQ|(8<<3),
+    LWQQ_MT_FILE_MSG = LWQQ_MF_SEQ|(9<<3),
+    LWQQ_MT_NOTIFY_OFFFILE = LWQQ_MF_SEQ|(10<<3),
+    LWQQ_MT_INPUT_NOTIFY = 11<<3,
     LWQQ_MT_UNKNOWN,
 } LwqqMsgType;
-typedef enum {
-    LWQQ_MC_OK = 0,
-    LWQQ_MC_TOO_FAST = 108,             //< send message too fast
-    LWQQ_MC_LOST_CONN = 121
-}LwqqMsgRetcode;
+#define lwqq_mt_bits(t) (t&~(-1<<8))
+
+typedef struct LwqqMsg {
+    LwqqMsgType type;
+} LwqqMsg;
+
+typedef struct LwqqMsgSeq {
+    LwqqMsg super;
+    char* from;
+    char* to;
+    int msg_id;
+    int msg_id2;
+} LwqqMsgSeq;
+
 
 typedef struct LwqqMsgContent {
     enum {
@@ -66,17 +88,14 @@ typedef struct LwqqMsgContent {
             char* key;
             char serv_ip[24];
             char serv_port[8];
+            char* direct_url;
         }cface;
     } data;
     TAILQ_ENTRY(LwqqMsgContent) entries;
-} LwqqMsgContent ;
+}LwqqMsgContent;
 
 typedef struct LwqqMsgMessage {
-    LwqqMsgType type;
-    char *from;
-    char *to;
-    char *msg_id;
-    int msg_id2;
+    LwqqMsgSeq super;
     time_t time;
     union{
         struct {
@@ -99,23 +118,26 @@ typedef struct LwqqMsgMessage {
     struct {
         int b, i, u; /* bold , italic , underline */
     } f_style;
-    char *f_color;
+    char f_color[7];
 
-    TAILQ_HEAD(, LwqqMsgContent) content;
+    TAILQ_HEAD(LwqqMsgContentHead, LwqqMsgContent) content;
 } LwqqMsgMessage;
 
 typedef struct LwqqMsgStatusChange {
+    LwqqMsg super;
     char *who;
     char *status;
     int client_type;
 } LwqqMsgStatusChange;
 
 typedef struct LwqqMsgKickMessage {
+    LwqqMsg super;
     int show_reason;
     char *reason;
     char *way;
 } LwqqMsgKickMessage;
 typedef struct LwqqMsgSystem{
+    LwqqMsgSeq super;
     char* seq;
     enum {
         VERIFY_REQUIRED,
@@ -124,7 +146,6 @@ typedef struct LwqqMsgSystem{
         ADDED_BUDDY_SIG,
         SYSTEM_TYPE_UNKNOW
     }type;
-    char* from_uin;
     char* account;
     char* stat;
     char* client_type;
@@ -142,25 +163,38 @@ typedef struct LwqqMsgSystem{
     };
 } LwqqMsgSystem;
 typedef struct LwqqMsgSysGMsg{
+    LwqqMsgSeq super;
     enum {
         GROUP_CREATE,
         GROUP_JOIN,
         GROUP_LEAVE,
-        GROUP_UNKNOW
+        GROUP_REQUEST_JOIN,
+        GROUP_UNKNOW,
     }type;
+    char* group_uin;
     char* gcode;
+    char* account;
+    char* member_uin;
+    char* member;
+    char* admin_uin;
+    char* admin;
+    LwqqGroup* group;
+    union{
+        struct {
+            char* msg;
+        }request_join;
+    };
 }LwqqMsgSysGMsg;
 typedef struct LwqqMsgBlistChange{
+    LwqqMsg super;
     LIST_HEAD(,LwqqSimpleBuddy) added_friends;
     LIST_HEAD(,LwqqBuddy) removed_friends;
 } LwqqMsgBlistChange;
 typedef struct LwqqMsgOffFile{
-    char* msg_id;
+    LwqqMsgSeq super;
     char* rkey;
     char ip[24];
     char port[8];
-    char* from;
-    char* to;
     size_t size;
     char* name;
     char* path;///< only used when upload
@@ -180,9 +214,8 @@ typedef struct FileTransItem{
     LIST_ENTRY(FileTransItem) entries;
 }FileTransItem;
 typedef struct LwqqMsgFileTrans{
+    LwqqMsgSeq super;
     int file_count;
-    char* from;
-    char* to;
     char* lc_id;
     size_t now;
     int operation;
@@ -190,15 +223,13 @@ typedef struct LwqqMsgFileTrans{
     LIST_HEAD(,FileTransItem) file_infos;
 }LwqqMsgFileTrans;
 typedef struct LwqqMsgFileMessage{
+    LwqqMsgSeq super;
     int msg_id;
     enum {
         MODE_RECV,
         MODE_REFUSE,
         MODE_SEND_ACK
     } mode;
-    char* from;
-    char* to;
-    int msg_id2;
     int session_id;
     time_t time;
     int type;
@@ -219,9 +250,7 @@ typedef struct LwqqMsgFileMessage{
 }LwqqMsgFileMessage;
 
 typedef struct LwqqMsgNotifyOfffile{
-    int msg_id;
-    char* from;
-    char* to;
+    LwqqMsgSeq super;
     enum {
         NOTIFY_OFFFILE_REFUSE = 2,
     }action;
@@ -230,17 +259,12 @@ typedef struct LwqqMsgNotifyOfffile{
 }LwqqMsgNotifyOfffile;
 
 typedef struct LwqqMsgInputNotify{
+    LwqqMsg super;
     char* from;
     char* to;
     int msg_type;
 }LwqqMsgInputNotify;
 
-
-typedef struct LwqqMsg {
-    /* Message type. e.g. buddy message or group message */
-    LwqqMsgType type;
-    void *opaque;               /**< Message details */
-} LwqqMsg;
 
 /**
  * Create a new LwqqMsg object
@@ -260,6 +284,10 @@ void lwqq_msg_free(LwqqMsg *msg);
 
 /************************************************************************/
 /* LwqqRecvMsg API */
+typedef enum {
+    POLL_AUTO_REQUEST_PIC = 1<<1,
+    POLL_AUTO_REQUEST_CFACE = 1<<2,
+}LwqqPollFlag;
 /**
  * Lwqq Receive Message object, used by receiving message
  *
@@ -268,15 +296,14 @@ typedef struct LwqqRecvMsg {
     LwqqMsg *msg;
     TAILQ_ENTRY(LwqqRecvMsg) entries;
 } LwqqRecvMsg;
-
 typedef struct LwqqRecvMsgList {
     int count;                  /**< Number of message  */
-    pthread_t tid;
-    pthread_attr_t attr;
     pthread_mutex_t mutex;
+    int poll_flags;
     TAILQ_HEAD(RecvMsgListHead, LwqqRecvMsg) head;
     void *lc;                   /**< Lwqq Client reference */
     void (*poll_msg)(struct LwqqRecvMsgList *list); /**< Poll to fetch msg */
+    void (*poll_close)(struct LwqqRecvMsgList* list);/**< Close Poll */
 } LwqqRecvMsgList;
 
 /**
@@ -307,7 +334,7 @@ void lwqq_recvmsg_free(LwqqRecvMsgList *list);
  * @return return a async event. you can wait it or add a event listener.
  *
  */
-LwqqAsyncEvent* lwqq_msg_send(LwqqClient *lc, LwqqMsg *msg);
+LwqqAsyncEvent* lwqq_msg_send(LwqqClient *lc, LwqqMsgMessage *msg);
 
 /**
  * easy way to send message
@@ -350,13 +377,14 @@ LwqqAsyncEvent* lwqq_msg_upload_offline_file(LwqqClient* lc,LwqqMsgOffFile* file
 //call this function when upload_offline_file finished.
 LwqqAsyncEvent* lwqq_msg_send_offfile(LwqqClient* lc,LwqqMsgOffFile* file);
 //call this when upload failed.
-void lwqq_msg_offfile_free(void* opaque);
 
 LwqqAsyncEvent* lwqq_msg_accept_file(LwqqClient* lc,LwqqMsgFileMessage* msg,const char* saveto);
 LwqqAsyncEvent* lwqq_msg_upload_file(LwqqClient* lc,LwqqMsgOffFile* file,
         LWQQ_PROGRESS progress,void* prog_data);
 
 LwqqAsyncEvent* lwqq_msg_input_notify(LwqqClient* lc,const char* serv_id);
+#define lwqq_msg_move(from,to) {memcpy(to,from,sizeof(*from));memset(from,0,sizeof(*from));}
+
 
 /************************************************************************/
 /*  LwqqSendMsg API */

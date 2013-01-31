@@ -12,6 +12,17 @@
 #define LWQQ_INFO_H
 
 #include "type.h"
+#include "msg.h"
+
+typedef struct LwqqBusinessCard {
+    char* phone;
+    char* uin;
+    char* email;
+    char* remark;
+    char* gcode;
+    char* name;
+    LwqqGender gender;
+} LwqqBusinessCard;
 
 /** 
  * Get QQ friends information. These information include basic friend
@@ -42,8 +53,7 @@ LwqqAsyncEvent* lwqq_info_get_discu_name_list(LwqqClient* lc);
  * @param buddy 
  * @param err 
  */
-void lwqq_info_get_friend_detail_info(LwqqClient *lc, LwqqBuddy *buddy,
-                                      LwqqErrorCode *err);
+LwqqAsyncEvent* lwqq_info_get_friend_detail_info(LwqqClient *lc, LwqqBuddy *buddy);
 /**
  * Store QQ face to LwqqBuddy::avatar
  * and save it possibly
@@ -59,13 +69,13 @@ void lwqq_info_get_friend_detail_info(LwqqClient *lc, LwqqBuddy *buddy,
  *         0 means failed
  */
 #define lwqq_info_get_friend_avatar(lc,buddy) \
-((buddy!=NULL) ? lwqq_info_get_avatar(lc,0,buddy):NULL) 
+((buddy!=NULL) ? lwqq_info_get_avatar(lc,buddy,NULL):NULL) 
 
 #define lwqq_info_get_group_avatar(lc,group) \
-((group!=NULL) ? lwqq_info_get_avatar(lc,1,group):NULL) 
+((group!=NULL) ? lwqq_info_get_avatar(lc,NULL,group):NULL) 
 
 
-LwqqAsyncEvent* lwqq_info_get_avatar(LwqqClient* lc,int isgroup,void* grouporbuddy);
+LwqqAsyncEvent* lwqq_info_get_avatar(LwqqClient* lc,LwqqBuddy* buddy,LwqqGroup* group);
 /** 
  * Get all friends qqnumbers
  * 
@@ -83,13 +93,10 @@ void lwqq_info_get_all_friend_qqnumbers(LwqqClient *lc, LwqqErrorCode *err);
  * @return qqnumber on sucessful, NB: caller is responsible for freeing
  * the memory returned by this function
  */
-#define lwqq_info_get_friend_qqnumber(lc,buddy) \
-((buddy!=NULL) ? lwqq_info_get_qqnumber(lc,0,buddy):NULL) 
+#define lwqq_info_get_friend_qqnumber(lc,buddy) (lwqq_info_get_qqnumber(lc,buddy,NULL))
+#define lwqq_info_get_group_qqnumber(lc,group) (lwqq_info_get_qqnumber(lc,NULL,group))
 
-#define lwqq_info_get_group_qqnumber(lc,group) \
-((group!=NULL) ? lwqq_info_get_qqnumber(lc,1,group):NULL) 
-
-LwqqAsyncEvent* lwqq_info_get_qqnumber(LwqqClient* lc,int isgroup,void* grouporbuddy);
+LwqqAsyncEvent* lwqq_info_get_qqnumber(LwqqClient* lc,LwqqBuddy* buddy,LwqqGroup* group);
 
 /**
  * Get QQ groups detail information. 
@@ -116,17 +123,24 @@ LwqqAsyncEvent* lwqq_info_change_buddy_markname(LwqqClient* lc,LwqqBuddy* buddy,
 LwqqAsyncEvent* lwqq_info_change_group_markname(LwqqClient* lc,LwqqGroup* group,const char* alias);
 LwqqAsyncEvent* lwqq_info_change_discu_topic(LwqqClient* lc,LwqqGroup* group,const char* alias);
 LwqqAsyncEvent* lwqq_info_modify_buddy_category(LwqqClient* lc,LwqqBuddy* buddy,const char* new_cate);
-typedef enum {
-    LWQQ_DEL_FROM_OTHER = 2/* delete buddy and remove myself from other buddy list */
-}LWQQ_DEL_FRIEND_TYPE;
-LwqqAsyncEvent* lwqq_info_delete_friend(LwqqClient* lc,LwqqBuddy* buddy,LWQQ_DEL_FRIEND_TYPE del_type);
-LwqqAsyncEvent* lwqq_info_allow_added_request(LwqqClient* lc,const char* account);
-LwqqAsyncEvent* lwqq_info_deny_added_request(LwqqClient* lc,const char* account,const char* reason);
-LwqqAsyncEvent* lwqq_info_allow_and_add(LwqqClient* lc,const char* account,const char* markname);
+LwqqAsyncEvent* lwqq_info_delete_friend(LwqqClient* lc,LwqqBuddy* buddy,LwqqDelFriendType del_type);
 void lwqq_info_get_group_sig(LwqqClient* lc,LwqqGroup* group,const char* to_uin);
-LwqqAsyncEvent* lwqq_info_change_status(LwqqClient* lc,LWQQ_STATUS status);
-LwqqVerifyCode* lwqq_info_add_friend_get_image();
-LwqqAsyncEvent* lwqq_info_mask_group(LwqqClient* lc,LwqqGroup* group,LWQQ_MASK mask);
+LwqqAsyncEvent* lwqq_info_change_status(LwqqClient* lc,LwqqStatus status);
+LwqqAsyncEvent* lwqq_info_mask_group(LwqqClient* lc,LwqqGroup* group,LwqqMask mask);
 
+LwqqAsyncEvent* lwqq_info_search_friend_by_qq(LwqqClient* lc,const char* qq,LwqqBuddy* out);
+LwqqAsyncEvent* lwqq_info_add_friend(LwqqClient* lc,LwqqBuddy* out,const char* message);
+LwqqAsyncEvent* lwqq_info_search_group_by_qq(LwqqClient* lc,const char* qq,LwqqGroup* out);
+LwqqAsyncEvent* lwqq_info_add_group(LwqqClient* lc,LwqqGroup* group,const char* msg);
+LwqqAsyncEvent* lwqq_info_get_stranger_info(LwqqClient* lc,LwqqMsgSysGMsg* msg,LwqqBuddy* out);
+LwqqAsyncEvent* lwqq_info_answer_request_join_group(LwqqClient* lc,LwqqMsgSysGMsg* msg ,LwqqAnswer answer,const char* reason);
+// when allow == LWQQ_DENY extra is reason
+// when allow == LWQQ_ALLOW_AND_ADD extra is markname
+LwqqAsyncEvent* lwqq_info_answer_request_friend(LwqqClient* lc,const char* qq,LwqqAllow allow,const char* extra);
+
+LwqqAsyncEvent* lwqq_info_get_group_public(LwqqClient* lc,LwqqGroup* g);
+void lwqq_card_free(LwqqBusinessCard* card);
+LwqqAsyncEvent* lwqq_info_get_self_card(LwqqClient* lc,LwqqGroup* g,LwqqBusinessCard* card);
+LwqqAsyncEvent* lwqq_info_set_self_card(LwqqClient* lc,LwqqBusinessCard* card);
 
 #endif  /* LWQQ_INFO_H */

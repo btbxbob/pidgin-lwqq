@@ -45,6 +45,7 @@ typedef struct LwqqHttpRequest {
      * after do_request() called.
      */
     long http_code;
+    int retry;
 
     /* Server response, used when do async request */
     char *location;
@@ -65,14 +66,14 @@ typedef struct LwqqHttpRequest {
      * if we make a POST request, we must provide a http body.
      */
     LwqqAsyncEvent* (*do_request_async)(struct LwqqHttpRequest *request, int method,
-                            char *body, LwqqAsyncCallback callback, void *data);
+                            char *body,LwqqCommand);
 
     /* Set our http client header */
     void (*set_header)(struct LwqqHttpRequest *request, const char *name,
                        const char *value);
 
     /* Set default http header */
-    void (*set_default_header)(struct LwqqHttpRequest *request);
+    //void (*set_default_header)(struct LwqqHttpRequest *request);
 
     /**
      * Get header, return a alloca memory, so caller has responsibility
@@ -90,6 +91,7 @@ typedef struct LwqqHttpRequest {
     void (*add_file_content)(struct LwqqHttpRequest* request,const char* name,const char* filename,const void* data,size_t size,const char* extension);
     int (*progress_func)(void* data,size_t now,size_t total);
     void* prog_data;
+    time_t last_prog;
 
 } LwqqHttpRequest;
 
@@ -118,7 +120,7 @@ LwqqHttpRequest *lwqq_http_request_new(const char *uri);
  *
  * @return Null if failed, else a new http request object
  */
-LwqqHttpRequest *lwqq_http_create_default_request(const char *url,
+LwqqHttpRequest *lwqq_http_create_default_request(LwqqClient* lc,const char *url,
         LwqqErrorCode *err);
 
 typedef enum {
@@ -130,6 +132,7 @@ typedef enum {
 }LwqqHttpOption;
 void lwqq_http_global_init();
 void lwqq_http_global_free();
+void lwqq_http_cleanup(LwqqClient*lc);
 void lwqq_http_set_option(LwqqHttpRequest* req,LwqqHttpOption opt,...);
 void lwqq_http_on_progress(LwqqHttpRequest* req,LWQQ_PROGRESS progress,void* prog_data);
 char* lwqq_http_escape(LwqqHttpRequest* req,const char* url);

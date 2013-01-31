@@ -10,6 +10,9 @@
 #ifndef LWQQ_ASYNC_H
 #define LWQQ_ASYNC_H
 #include "type.h"
+#include "msg.h"
+#include "util.h"
+#include <assert.h>
 
 
 #ifndef USE_LIBPURPLE
@@ -18,30 +21,16 @@
 #endif
 #endif
 
-#ifdef USE_LIBPURPLE
-#include <eventloop.h>
-typedef struct{
-    int ev;
-    void* wrap;
-}LwqqAsyncIo;
-typedef int LwqqAsyncTimer;
-typedef LwqqAsyncIo* LwqqAsyncIoHandle;
-typedef LwqqAsyncTimer* LwqqAsyncTimerHandle;
-#define LWQQ_ASYNC_READ PURPLE_INPUT_READ
-#define LWQQ_ASYNC_WRITE PURPLE_INPUT_WRITE
-#endif
+typedef struct LwqqAsyncEntry {
+    void* func;
+    LwqqAsyncEvent* ev;
+    LIST_ENTRY(LwqqAsyncEntry) entries;
+}LwqqAsyncEntry;
 
-#ifdef USE_LIBEV
-#include <ev.h>
-typedef ev_timer  LwqqAsyncTimer;
-typedef ev_io     LwqqAsyncIo;
-typedef ev_timer* LwqqAsyncTimerHandle;
-typedef ev_io*    LwqqAsyncIoHandle;
-#define LWQQ_ASYNC_READ EV_READ
-#define LWQQ_ASYNC_WRITE EV_WRITE
-#endif
-
-/** call this function when you quit your program.*/
+/** 
+ * call this function when you quit your program.
+ * NOTE!! you must call lwqq_http_global_free first !!
+ * */
 void lwqq_async_global_quit();
 /**===================EVSET API==========================================**/
 /** design prospective ::
@@ -69,8 +58,22 @@ void lwqq_async_global_quit();
 /** this api is better than old async api.
  * it is more powerful and easier to use
  */
-typedef void (*EVENT_CALLBACK)(LwqqAsyncEvent* event,void* data);
-typedef void (*EVSET_CALLBACK)(LwqqAsyncEvset* evset,void* data);
+
+typedef struct _LwqqAsyncEvent {
+    /** 0 : success
+     *  >0: errno form webqq server
+     *  <0: errno from lwqq inner
+     */
+    int result;
+    LwqqCallbackCode failcode; ///<it must put second
+    LwqqClient* lc;
+}_LwqqAsyncEvent;
+typedef struct _LwqqAsyncEvset{
+    /** 0 : no error
+     *  >0: number of errors
+     */
+    int result;
+}_LwqqAsyncEvset;
 /** return a new evset. a evset can link multi of event.
  * you can wait a evset. means it would block ultil all event is finished
  */
@@ -98,22 +101,27 @@ void lwqq_async_evset_add_event(LwqqAsyncEvset* host,LwqqAsyncEvent *handle);
  * because you can set different data to different event which may the same function.
  * async listener can only set one data for one ListenerType.
  */
-void lwqq_async_add_event_listener(LwqqAsyncEvent* event,EVENT_CALLBACK callback,void* data);
-void lwqq_async_add_evset_listener(LwqqAsyncEvset* evset,EVSET_CALLBACK callback,void* data);
+void lwqq_async_add_event_listener(LwqqAsyncEvent* event,LwqqCommand cmd);
+void lwqq_async_add_evset_listener(LwqqAsyncEvset* evset,LwqqCommand cmd);
 /** !!not finished yet */
 void lwqq_async_event_set_progress(LwqqAsyncEvent* event,LWQQ_PROGRESS callback,void* data);
 /** this set the errno for a event.
  * it is a hack code.
  * ensure LwqqAsyncEvent first member is a int.
  */
-#define lwqq_async_event_set_result(ev,res)\
-do{\
-    *((int*)ev) = res;\
-}while(0)
+#define type_assert(what,type) {type ptr = what;assert(ptr);}
+#define lwqq_async_event_set_result(ev,res) (ev->result = res)
+#define lwqq_async_event_set_code(ev,code)  (ev->failcode = code)
 /** this return a errno of a event. */
-#define lwqq_async_event_get_result(ev) (ev?*((int*)ev):-1)
+#define lwqq_async_event_get_result(ev)     (ev?ev->result:-1)
+#define lwqq_async_event_get_code(ev)       (ev?ev->failcode:LWQQ_CALLBACK_FAILED)
+#define lwqq_async_event_get_owner(ev)      (ev->lc)
 /** this return one of errno of event in set ,so do not use it*/
-#define lwqq_async_evset_get_result(ev) (ev?*((int*)ev):-1)
+#define lwqq_async_evset_get_result(ev)     (ev?ev->result:-1)
+
+LwqqAsyncEvent* lwqq_async_queue_find(LwqqAsyncQueue* queue,void* func);
+void lwqq_async_queue_add(LwqqAsyncQueue* queue,void* func,LwqqAsyncEvent* ev);
+void lwqq_async_queue_rm(LwqqAsyncQueue* queue,void* func);
 
 extern int LWQQ_ASYNC_GLOBAL_SYNC_ENABLED;
 #define LWQQ_SYNC_BEGIN() { LWQQ_ASYNC_GLOBAL_SYNC_ENABLED = 1;
@@ -139,17 +147,72 @@ extern int LWQQ_ASYNC_GLOBAL_SYNC_ENABLED;
  *
  */
 struct _LwqqAsyncOption {
-    DISPATCH_FUNC poll_msg;
-    DISPATCH_FUNC poll_lost;
-
+    /**
+     * this is login complete .whatever successed or failed
+     * except need verify code
+     */
+    void (*login_complete)(LwqqClient* lc,LwqqErrorCode ec);
+    /* this is login complete when need verify code */
+    void (*login_verify)(LwqqClient* lc);
+    /* this is very important when poll message come */
+    void (*poll_msg)(LwqqClient* lc);
+    /* this is poll lost after recv retcode 112 or 108 */
+    void (*poll_lost)(LwqqClient* lc);
+    /* this is upload content failed such as lwqq offline pic */
+    void (*upload_fail)(LwqqClient* lc,const char* serv_id,struct LwqqMsgContent* c);
+    /* this is you confirmed a friend request 
+     * you should add buddy to gui level.
+     */
+    void (*request_confirm)(LwqqClient* lc,LwqqBuddy* buddy);
+    void (*need_verify2)(LwqqClient* lc,LwqqVerifyCode* code);
+    void (*need_confirm)(LwqqClient* lc,LwqqConfirmTable* table);
 };
 
+void lwqq_async_dispatch(DISPATCH_FUNC dsph,CALLBACK_FUNC func , ...);
 //initialize lwqq client with default dispatch function
 void lwqq_async_init(LwqqClient* lc);
 
 
 //=========================LWQQ ASYNC LOW LEVEL EVENT LOOP API====================//
 //=======================PLEASE MAKE SURE DONT USED IN YOUR CODE==================//
+/** watch an io socket for special event
+ * implement by libev or libpurple
+ * @param io this is pointer to a LwqqAsyncIo struct
+ * @param fd socket
+ * @param action combination of LWQQ_ASYNC_READ and LWQQ_ASYNC_WRITE
+ */
+#ifdef USE_LIBPURPLE
+#include <eventloop.h>
+typedef struct{
+    int ev;
+    void* wrap;
+}LwqqAsyncIo;
+typedef struct LwqqAsyncTimer{
+    int h;
+    void (*func)(struct LwqqAsyncTimer* timer,void* data);
+    void *data;
+    int ret;
+}LwqqAsyncTimer;
+typedef LwqqAsyncIo* LwqqAsyncIoHandle;
+typedef LwqqAsyncTimer* LwqqAsyncTimerHandle;
+#define LWQQ_ASYNC_READ PURPLE_INPUT_READ
+#define LWQQ_ASYNC_WRITE PURPLE_INPUT_WRITE
+#endif
+
+#ifdef USE_LIBEV
+#include <ev.h>
+typedef struct LwqqAsyncTimer{
+    ev_timer  h;
+    void (*func)(struct LwqqAsyncTimer* timer,void* data);
+    void* data;
+    int on_call;
+}LwqqAsyncTimer;
+typedef ev_io     LwqqAsyncIo;
+typedef LwqqAsyncTimer* LwqqAsyncTimerHandle;
+typedef ev_io*    LwqqAsyncIoHandle;
+#define LWQQ_ASYNC_READ EV_READ
+#define LWQQ_ASYNC_WRITE EV_WRITE
+#endif
 /** the call back of io watch 
  * @param data user defined data
  * @param fd the socket
@@ -160,13 +223,7 @@ typedef void (*LwqqAsyncIoCallback)(void* data,int fd,int action);
  * @param data user defined data
  * return 1 to continue timer 0 to stop timer.
  */
-typedef int (*LwqqAsyncTimerCallback)(void* data);
-/** watch an io socket for special event
- * implement by libev or libpurple
- * @param io this is pointer to a LwqqAsyncIo struct
- * @param fd socket
- * @param action combination of LWQQ_ASYNC_READ and LWQQ_ASYNC_WRITE
- */
+typedef void (*LwqqAsyncTimerCallback)(LwqqAsyncTimer* timer,void* data);
 void lwqq_async_io_watch(LwqqAsyncIoHandle io,int fd,int action,LwqqAsyncIoCallback func,void* data);
 /** stop a io watcher */
 void lwqq_async_io_stop(LwqqAsyncIoHandle io);
@@ -177,6 +234,7 @@ void lwqq_async_io_stop(LwqqAsyncIoHandle io);
 void lwqq_async_timer_watch(LwqqAsyncTimerHandle timer,unsigned int ms,LwqqAsyncTimerCallback func,void* data);
 /** stop a timer */
 void lwqq_async_timer_stop(LwqqAsyncTimerHandle timer);
+void lwqq_async_timer_repeat(LwqqAsyncTimerHandle timer);
 //when caller finished . it would raise called finish yet.
 //so it is calld event chain.
 void lwqq_async_add_event_chain(LwqqAsyncEvent* caller,LwqqAsyncEvent* called);

@@ -16,10 +16,21 @@
 #include "logger.h"
 #include "msg.h"
 #include "async.h"
+#include "http.h"
+#include "internal.h"
+static struct LwqqStrMapEntry_ status_type_map[] = {
+    {"online",      LWQQ_STATUS_ONLINE},
+    {"offline",     LWQQ_STATUS_OFFLINE},
+    {"away",        LWQQ_STATUS_AWAY},
+    {"hidden",      LWQQ_STATUS_HIDDEN},
+    {"busy",        LWQQ_STATUS_BUSY},
+    {"callme",      LWQQ_STATUS_CALLME},
+    {"slient",      LWQQ_STATUS_SLIENT},
+    {NULL,          LWQQ_STATUS_LOGOUT}
+};
 
-static int null_action(LwqqClient* lc,void* param)
+static void null_action(LwqqClient* lc)
 {
-    return 0;
 }
 
 static LwqqAsyncOption default_async_opt = {
@@ -105,7 +116,9 @@ void lwqq_vc_free(LwqqVerifyCode *vc)
         s_free(vc->type);
         s_free(vc->img);
         s_free(vc->uin);
+        s_free(vc->verifysession);
         s_free(vc);
+
     }
 }
 
@@ -122,6 +135,7 @@ static void cookies_free(LwqqCookies *c)
         s_free(c->pt2gguin);
         s_free(c->verifysession);
         s_free(c->lwcookies);
+        s_free(c->RK);
         s_free(c);
     }
 }
@@ -134,6 +148,7 @@ static void lwqq_categories_free(LwqqFriendCategory *cate)
     s_free(cate->name);
     s_free(cate);
 }
+
 
 /** 
  * Free LwqqClient instance
@@ -150,6 +165,9 @@ void lwqq_client_free(LwqqClient *client)
     if (!client)
         return ;
 
+    //important remove all http request
+    lwqq_http_cleanup(client);
+
     /* Free LwqqVerifyCode instance */
     s_free(client->username);
     s_free(client->password);
@@ -164,6 +182,7 @@ void lwqq_client_free(LwqqClient *client)
     s_free(client->port);
     s_free(client->vfwebqq);
     s_free(client->psessionid);
+    s_free(client->new_ptwebqq);
     lwqq_buddy_free(client->myself);
         
     /* Free friends list */
@@ -192,6 +211,7 @@ void lwqq_client_free(LwqqClient *client)
 
     /* Free msg_list */
     lwqq_recvmsg_free(client->msg_list);
+    client->magic = 0;
     s_free(client);
 }
 
@@ -246,9 +266,9 @@ void lwqq_buddy_free(LwqqBuddy *buddy)
     s_free(buddy->vip_info);
     s_free(buddy->markname);
     s_free(buddy->flag);
-    s_free(buddy->cate_index);
     
     s_free(buddy->avatar);
+    s_free(buddy->token);
     
     s_free(buddy);
 }
@@ -301,6 +321,16 @@ LwqqBuddy *lwqq_buddy_find_buddy_by_qqnumber(LwqqClient *lc, const char *qqnum)
         //this may caused by qqnumber not loaded successful.
         if(buddy->qqnumber && strcmp(buddy->qqnumber,qqnum)==0)
             return buddy;
+    }
+    return NULL;
+}
+LwqqFriendCategory* lwqq_category_find_by_name(LwqqClient* lc,const char* name,const char* def_name)
+{
+    if(!lc||!name||!def_name) return NULL;
+    LwqqFriendCategory* cate;
+    if(!strcmp(name,def_name)) name = LWQQ_DEFAULT_CATE;
+    LIST_FOREACH(cate,&lc->categories,entries){
+        if(cate->name && !strcmp(cate->name,name)) return cate;
     }
     return NULL;
 }
@@ -386,6 +416,19 @@ LwqqGroup *lwqq_group_find_group_by_gid(LwqqClient *lc, const char *gid)
     return NULL;
 }
 
+LwqqGroup* lwqq_group_find_group_by_qqnumber(LwqqClient* lc,const char* qqnumber)
+{
+    LwqqGroup *group;
+    
+    if (!lc || !qqnumber)
+        return NULL;
+
+    LIST_FOREACH(group,&lc->groups,entries){
+        if(group->account && ! strcmp(group->account,qqnumber) ) return group;
+    }
+    return NULL;
+}
+
 /** 
  * Find group member object by member's uin
  * 
@@ -409,27 +452,50 @@ LwqqSimpleBuddy *lwqq_group_find_group_member_by_uin(LwqqGroup *group, const cha
     return NULL;
 }
 
-const char* lwqq_status_to_str(LWQQ_STATUS status)
+const char* lwqq_status_to_str(LwqqStatus status)
 {
-    switch(status){
-        case LWQQ_STATUS_ONLINE: return "online";break;
-        case LWQQ_STATUS_OFFLINE: return "offline";break;
-        case LWQQ_STATUS_AWAY: return "away";break;
-        case LWQQ_STATUS_HIDDEN: return "hidden";break;
-        case LWQQ_STATUS_BUSY: return "busy";break;
-        case LWQQ_STATUS_CALLME: return "callme";break;
-        case LWQQ_STATUS_SLIENT: return "slient";break;
-        default: return "unknow";break;
-    }
+    return lwqq__map_to_str_(status_type_map, status);
 }
-LWQQ_STATUS lwqq_status_from_str(const char* str)
+LwqqStatus lwqq_status_from_str(const char* str)
 {
-    if(strcmp(str,"online")==0) return LWQQ_STATUS_ONLINE;
-    else if(strcmp(str,"offline")==0) return LWQQ_STATUS_OFFLINE;
-    else if(strcmp(str,"away")==0) return LWQQ_STATUS_AWAY;
-    else if(strcmp(str,"hidden")==0) return LWQQ_STATUS_HIDDEN;
-    else if(strcmp(str,"busy")==0) return LWQQ_STATUS_BUSY;
-    else if(strcmp(str,"callme")==0) return LWQQ_STATUS_CALLME;
-    else if(strcmp(str,"slient")==0) return LWQQ_STATUS_SLIENT;
-    else return LWQQ_STATUS_UNKNOW;
+    return lwqq__map_to_type_(status_type_map, str);
+}
+
+
+
+void lwqq_set_cookie(LwqqCookies* c,const char* key,const char* value)
+{
+    if(!c) return;
+#define SET_COOKIE_IF_MATCH(k) if(!strncmp(key,#k,strlen(#k))){\
+    s_free(c->k);c->k = s_strdup(value);\
+    goto done;\
+    }
+    SET_COOKIE_IF_MATCH(ptvfsession);
+    SET_COOKIE_IF_MATCH(ptcz);
+    SET_COOKIE_IF_MATCH(skey);
+    SET_COOKIE_IF_MATCH(ptwebqq);
+    SET_COOKIE_IF_MATCH(ptuserinfo);
+    SET_COOKIE_IF_MATCH(uin);
+    SET_COOKIE_IF_MATCH(ptisp);
+    SET_COOKIE_IF_MATCH(pt2gguin);
+    SET_COOKIE_IF_MATCH(verifysession);
+    SET_COOKIE_IF_MATCH(RK);
+    lwqq_log(LOG_ERROR,"No this cookie:%s\n",key);
+done:
+    s_free(c->lwcookies);
+    char buf[4096]={0};
+#define PUT_COOKIE_KEY(k) if(c->k){strcat(buf,#k"=");strcat(buf,c->k);strcat(buf,"; ");}
+    PUT_COOKIE_KEY(ptvfsession);
+    PUT_COOKIE_KEY(ptcz);
+    PUT_COOKIE_KEY(skey);
+    PUT_COOKIE_KEY(ptwebqq);
+    PUT_COOKIE_KEY(ptuserinfo);
+    PUT_COOKIE_KEY(uin);
+    PUT_COOKIE_KEY(ptisp);
+    PUT_COOKIE_KEY(pt2gguin);
+    PUT_COOKIE_KEY(verifysession);
+    PUT_COOKIE_KEY(RK);
+    c->lwcookies = s_strdup(buf);
+#undef SET_COOKIE_IF_MATCH
+#undef PUT_COOKIE_KEY
 }

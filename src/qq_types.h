@@ -20,8 +20,17 @@ typedef struct _AsyncListener AsyncListener;
 #	define UNUSED(x) x
 #endif
 
+#ifdef USE_LIBEV
+//the ev dispatch macro
+//ld:long dispatch,d:lc->dispatch,sd:short dispatch
+#define _EV_(ld,d,sd) ld,d,vp_func_##sd
+#else
+#define _EV_(ld,d,sd) sd
+#endif
+
 #define DISPLAY_VERSION "0.1"
 #define DBGID   "webqq"
+#define QQ_DEFAULT_CATE "QQ好友"
 //this is qqnumber of a group
 #define QQ_ROOM_KEY_QUN_ID "account"
 #define QQ_ROOM_KEY_GID "gid"
@@ -47,10 +56,12 @@ typedef struct qq_account {
     }state;
     int msg_poll_handle;
     GPtrArray* opend_chat;
+    GList* p_buddy_list;///< purple buddy list
+    GList* rewrite_pic_list;
 #if QQ_USE_FAST_INDEX
     struct{
         GHashTable* qqnum_index;
-        GHashTable* uin_index;
+        GHashTable* uin_index;          ///< key:char*,value:struct index_node
     }fast_index;
 #endif
     struct{
@@ -72,14 +83,13 @@ typedef struct system_msg {
 }system_msg;
 
 struct qq_extra_async_opt {
-    DISPATCH_FUNC login_complete;
-    DISPATCH_FUNC need_verify;
+    void (*login_complete)(LwqqClient* lc,LwqqErrorCode err);
+    void (*need_verify)(LwqqClient* lc,LwqqErrorCode err);
 };
 
-extern struct qq_extra_async_opt extra_async_opt;
+void qq_dispatch(DISPATCH_FUNC dsph,CALLBACK_FUNC func,...);
 
-
-int qq_set_basic_info(LwqqClient* lc,void* data);
+#define try_get(val,fail) (val?val:fail)
 
 qq_account* qq_account_new(PurpleAccount* account);
 void qq_account_free(qq_account* ac);
@@ -92,7 +102,7 @@ int open_new_chat(qq_account* ac,LwqqGroup* group);
 #define opend_chat_search(ac,group) open_new_chat(ac,group)
 #define opend_chat_index(ac,id) g_ptr_array_index(ac->opend_chat,id)
 
-void qq_sys_msg_write(qq_account* ac,LwqqMsgType m_t,const char* who,const char* msg,PurpleMessageFlags type,time_t t);
+void qq_sys_msg_write(qq_account* ac,LwqqMsgType m_t,const char* serv_id,const char* msg,PurpleMessageFlags type,time_t t);
 
 PurpleConversation* find_conversation(LwqqMsgType msg_type,const char* serv_id,qq_account* ac);
 void file_message(LwqqClient* lc,LwqqMsgFileMessage* file);
@@ -103,5 +113,8 @@ LwqqBuddy* find_buddy_by_qqnumber(LwqqClient* lc,const char* qqnum);
 LwqqGroup* find_group_by_qqnumber(LwqqClient* lc,const char* qqnum);
 LwqqBuddy* find_buddy_by_uin(LwqqClient* lc,const char* uin);
 LwqqGroup* find_group_by_gid(LwqqClient* lc,const char* gid);
+
+
+void vp_func_4pl(CALLBACK_FUNC func,vp_list* vp,void* p);
 
 #endif

@@ -3,33 +3,55 @@
 #include "msg.h"
 #include "async.h"
 
+struct dispatch_data{
+    DISPATCH_FUNC dsph;
+    CALLBACK_FUNC func;
+    vp_list data;
+};
+
 static int did_dispatch(void* param)
 {
-    void **d = param;
-    LwqqClient* lc = d[0];
-    DISPATCH_FUNC func = d[1];
-    void* data = d[2];
+    struct dispatch_data *d = param;
+    DISPATCH_FUNC dsph = d->dsph;
+    CALLBACK_FUNC func = d->func;
+    vp_start(d->data);
+    dsph(func,&d->data,NULL);
+    vp_end(d->data);
     s_free(d);
-    func(lc,data);
     return 0;
 }
 
-static void qq_dispatch(LwqqClient* lc,DISPATCH_FUNC func,void* param)
+void qq_dispatch(DISPATCH_FUNC dsph,CALLBACK_FUNC func,...)
 {
-    void **d = s_malloc(sizeof(void*)*3);
-    d[0] = lc;
-    d[1] = func;
-    d[2] = param;
-    purple_timeout_add(50,did_dispatch,d);
-}
+    struct dispatch_data* d = s_malloc0(sizeof(*d));
+    d->dsph = dsph;
+    d->func = func;
 
+    va_list args;
+    va_start(args,func);
+    dsph(NULL,&d->data,&args);
+    va_end(args);
+
+    purple_timeout_add(10,did_dispatch,d);
+}
+static void add_p_buddy_to_ac(void* a,void* b)
+{
+    PurpleBuddy* buddy = a;
+    qq_account* ac = b;
+    if(purple_buddy_get_account(buddy) == ac->account)
+        ac->p_buddy_list = g_list_prepend(ac->p_buddy_list,buddy);
+
+}
 qq_account* qq_account_new(PurpleAccount* account)
 {
     qq_account* ac = g_malloc0(sizeof(qq_account));
     ac->account = account;
     ac->magic = QQ_MAGIC;
     ac->qq_use_qqnum = 0;
+    //this is auto increment sized array . so don't worry about it.
     ac->opend_chat = g_ptr_array_sized_new(10);
+    ac->p_buddy_list = NULL;
+    g_slist_foreach(purple_blist_get_buddies(),add_p_buddy_to_ac,ac);
     const char* username = purple_account_get_username(account);
     const char* password = purple_account_get_password(account);
     ac->qq = lwqq_client_new(username,password);
@@ -37,15 +59,20 @@ qq_account* qq_account_new(PurpleAccount* account)
 #if QQ_USE_FAST_INDEX
     ac->qq->find_buddy_by_uin = find_buddy_by_uin;
     ac->qq->find_buddy_by_qqnumber = find_buddy_by_qqnumber;
-    ac->fast_index.uin_index = g_hash_table_new_full(g_str_hash,g_str_equal,NULL,g_free);
-    ac->fast_index.qqnum_index = g_hash_table_new_full(g_str_hash,g_str_equal,NULL,NULL);
+    ac->fast_index.uin_index = g_hash_table_new_full(g_str_hash,g_str_equal,g_free,g_free);
+    ac->fast_index.qqnum_index = g_hash_table_new_full(g_str_hash,g_str_equal,g_free,NULL);
 #endif
     ac->qq->dispatch = qq_dispatch;
     return ac;
 }
 void qq_account_free(qq_account* ac)
 {
-    g_ptr_array_free(ac->opend_chat,0);
+    int i;
+    PurpleConnection* gc = purple_account_get_connection(ac->account);
+    for(i=0;i<ac->opend_chat->len;i++){
+        purple_conversation_destroy(purple_find_chat(gc, i));
+    }
+    g_ptr_array_free(ac->opend_chat,1);
 #if QQ_USE_FAST_INDEX
     g_hash_table_destroy(ac->fast_index.qqnum_index);
     g_hash_table_destroy(ac->fast_index.uin_index);
@@ -62,14 +89,14 @@ void qq_account_insert_index_node(qq_account* ac,int type,void* data)
     node->node = data;
     if(type == NODE_IS_BUDDY){
         LwqqBuddy* buddy = data;
-        g_hash_table_insert(ac->fast_index.uin_index,buddy->uin,node);
+        g_hash_table_insert(ac->fast_index.uin_index,s_strdup(buddy->uin),node);
         if(buddy->qqnumber)
-            g_hash_table_insert(ac->fast_index.qqnum_index,buddy->qqnumber,node);
+            g_hash_table_insert(ac->fast_index.qqnum_index,s_strdup(buddy->qqnumber),node);
     }else{
         LwqqGroup* group = data;
-        g_hash_table_insert(ac->fast_index.uin_index,group->gid,node);
+        g_hash_table_insert(ac->fast_index.uin_index,s_strdup(group->gid),node);
         if(group->account)
-            g_hash_table_insert(ac->fast_index.qqnum_index,group->account,node);
+            g_hash_table_insert(ac->fast_index.qqnum_index,s_strdup(group->account),node);
     }
 #endif
 }
@@ -100,7 +127,7 @@ int open_new_chat(qq_account* ac,LwqqGroup* group)
     g_ptr_array_add(opend_chat,group);
     return index;
 }
-
+#if 0
 /**m_t == 0 buddy_message m_t == 1 chat_message*/
 static system_msg* system_msg_new(LwqqMsgType m_t,const char* who,qq_account* ac,const char* msg,int type,time_t t)
 {
@@ -130,23 +157,28 @@ static int sys_msg_write(LwqqClient* lc,void* data)
     system_msg_free(msg);
     return 0;
 }
+#endif
 
-void qq_sys_msg_write(qq_account* ac,LwqqMsgType m_t,const char* who,const char* msg,PurpleMessageFlags type,time_t t)
+void qq_sys_msg_write(qq_account* ac,LwqqMsgType m_t,const char* serv_id,const char* msg,PurpleMessageFlags type,time_t t)
 {
-    ac->qq->dispatch(ac->qq,sys_msg_write,system_msg_new(m_t,who,ac,msg,type,t));
+    //ac->qq->dispatch(vp_func_2p,(CALLBACK_FUNC)sys_msg_write,ac->qq,system_msg_new(m_t,serv_id,ac,msg,type,t));
+
+    PurpleConversation* conv = find_conversation(m_t,serv_id,ac);
+    if(conv)
+        purple_conversation_write(conv,NULL,msg,type,t);
 }
 
 PurpleConversation* find_conversation(LwqqMsgType msg_type,const char* serv_id,qq_account* ac)
 {
     PurpleAccount* account = ac->account;
     const char* local_id;
-    if(msg_type == LWQQ_MT_BUDDY_MSG){
+    if(msg_type == LWQQ_MS_BUDDY_MSG){
         if(ac->qq_use_qqnum){
             LwqqBuddy* buddy = ac->qq->find_buddy_by_uin(ac->qq,serv_id);
             local_id = (buddy&&buddy->qqnumber)?buddy->qqnumber:serv_id;
         }else local_id = serv_id;
         return purple_find_conversation_with_account(PURPLE_CONV_TYPE_IM,local_id,account);
-    } else if(msg_type == LWQQ_MT_GROUP_MSG || msg_type == LWQQ_MT_DISCU_MSG){
+    } else if(msg_type == LWQQ_MS_GROUP_MSG || msg_type == LWQQ_MS_DISCU_MSG){
         if(ac->qq_use_qqnum){
             LwqqGroup* group = find_group_by_gid(ac->qq,serv_id);
             local_id = (group&&group->account)?group->account:serv_id;
@@ -211,4 +243,23 @@ LwqqGroup* find_group_by_gid(LwqqClient* lc,const char* gid)
     return lwqq_group_find_group_by_gid(lc, gid);
 #endif
 }
-
+void vp_func_4pl(CALLBACK_FUNC func,vp_list* vp,void* q)
+{
+    typedef void (*f)(void*,void*,void*,void*,long);
+    if( q ){
+        va_list* va = q;
+        vp_init(*vp,sizeof(void*)*4+sizeof(long));
+        vp_dump(*vp,*va,void*);
+        vp_dump(*vp,*va,void*);
+        vp_dump(*vp,*va,void*);
+        vp_dump(*vp,*va,void*);
+        vp_dump(*vp,*va,long);
+        return ;
+    }
+    void* p1 = vp_arg(*vp,void*);
+    void* p2 = vp_arg(*vp,void*);
+    void* p3 = vp_arg(*vp,void*);
+    void* p4 = vp_arg(*vp,void*);
+    long p5 = vp_arg(*vp,long);
+    ((f)func)(p1,p2,p3,p4,p5);
+}

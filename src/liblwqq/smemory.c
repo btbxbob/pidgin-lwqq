@@ -34,6 +34,12 @@ void *s_malloc0(size_t size)
     return ptr;
 }
 
+/*j
+void s_free(void* ptr)
+{
+    if(ptr) free(ptr);
+}*/
+
 void *s_calloc(size_t nmemb, size_t lsize)
 {
     return calloc(nmemb, lsize);
@@ -77,15 +83,13 @@ int s_asprintf(char **buf, const char *format, ...)
 
     return rv;
 }
-int s_atoi(const char* s)
+int s_atoi(const char* s,int init)
 {
-    if(s) return atoi(s);
-    perror("atoi failed");
-    return 0;
+    if(s) return strtol(s,NULL,10);
+    return init;
 }
-int s_atol(const char* s)
+int s_atol(const char* s,int init)
 {
-    if(s) return atol(s);
-    perror("atol failed");
-    return 0;
+    if(s) return strtol(s,NULL,10);
+    return init;
 }
