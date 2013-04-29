@@ -167,11 +167,11 @@ typedef struct LwqqMsgSysGMsg{
     LwqqMsgSeq super;
     enum {
         GROUP_CREATE,
-        GROUP_JOIN,
-        GROUP_LEAVE,
-        GROUP_REQUEST_JOIN,
-        GROUP_REQUEST_JOIN_AGREE,
-        GROUP_REQUEST_JOIN_DENY,
+        GROUP_JOIN,                 //<admin or member(when admin operate) get this msg
+        GROUP_LEAVE,                //<admin or member(when admin operate) get this msg
+        GROUP_REQUEST_JOIN,         //<only admin get this msg
+        GROUP_REQUEST_JOIN_AGREE,   //<only member get this msg
+        GROUP_REQUEST_JOIN_DENY,    //<only member get this msg
         GROUP_UNKNOW,
     }type;
     char* group_uin;
@@ -182,7 +182,8 @@ typedef struct LwqqMsgSysGMsg{
     char* admin_uin;
     char* admin;
     char* msg;
-    LwqqGroup* group;
+    int is_myself;                  //<true when group should add or delete
+    LwqqGroup* group;               //<read group info from this.
 }LwqqMsgSysGMsg;
 typedef struct LwqqMsgBlistChange{
     LwqqMsg super;
@@ -292,6 +293,7 @@ void lwqq_msg_free(LwqqMsg *msg);
 typedef enum {
     POLL_AUTO_REQUEST_PIC = 1<<1,
     POLL_AUTO_REQUEST_CFACE = 1<<2,
+    POLL_REMOVE_DUPLICATED_MSG = 1<<3,
 }LwqqPollFlag;
 /**
  * Lwqq Receive Message object, used by receiving message
@@ -303,17 +305,24 @@ typedef struct LwqqRecvMsg {
 } LwqqRecvMsg;
 typedef struct LwqqRecvMsgList {
     int count;                  /**< Number of message  */
-    pthread_mutex_t mutex;
-    int poll_flags;
-    TAILQ_HEAD(RecvMsgListHead, LwqqRecvMsg) head;
     void *lc;                   /**< Lwqq Client reference */
-    void (*poll_msg)(struct LwqqRecvMsgList *list); /**< Poll to fetch msg */
+    pthread_mutex_t mutex;
+    //int poll_flags;
+    TAILQ_HEAD(RecvMsgListHead, LwqqRecvMsg) head;
+    void (*poll_msg)(struct LwqqRecvMsgList *list,int flags); /**< Poll to fetch msg */
     void (*poll_close)(struct LwqqRecvMsgList* list);/**< Close Poll */
 } LwqqRecvMsgList;
 typedef struct LwqqHistoryMsgList {
     int row;
-    int page;
-    int total;
+    union{
+    short page;
+    short begin;
+    };
+    union{
+    short total;
+    short end;
+    };
+    long reserve;       //<can store other data or a pointer.
     TAILQ_HEAD(,LwqqRecvMsg) msg_list;
 } LwqqHistoryMsgList;
 
@@ -387,7 +396,10 @@ LwqqMsgOffFile* lwqq_msg_fill_upload_offline_file(const char* filename,
 //you should always check server return to see it upload successful.
 //if successed use send_offfile function do send the message.
 //or use offfile_free to clean memory.
-LwqqAsyncEvent* lwqq_msg_upload_offline_file(LwqqClient* lc,LwqqMsgOffFile* file);
+typedef enum {
+    DONT_EXPECTED_100_CONTINUE = 1<<1
+}LwqqUploadFlag;
+LwqqAsyncEvent* lwqq_msg_upload_offline_file(LwqqClient* lc,LwqqMsgOffFile* file,int flags);
 //call this function when upload_offline_file finished.
 LwqqAsyncEvent* lwqq_msg_send_offfile(LwqqClient* lc,LwqqMsgOffFile* file);
 //not finished yet
@@ -415,6 +427,7 @@ LwqqAsyncEvent* lwqq_msg_shake_window(LwqqClient* lc,const char* serv_id);
 #define lwqq_msg_move(to,from) {memcpy(to,from,sizeof(*from));memset(from,0,sizeof(*from));}
 
 LwqqAsyncEvent* lwqq_msg_friend_history(LwqqClient* lc,const char* serv_id,LwqqHistoryMsgList* list);
+LwqqAsyncEvent* lwqq_msg_group_history(LwqqClient* lc,LwqqGroup* g,LwqqHistoryMsgList* list);
 
 /************************************************************************/
 /*  LwqqSendMsg API */

@@ -85,6 +85,7 @@ typedef struct LwdbUserDB {
     LwqqBuddy * (*query_buddy_info)(struct LwdbUserDB *db, const char *qqnumber);
     LwqqErrorCode (*update_buddy_info)(struct LwdbUserDB *db, LwqqBuddy *buddy);
 } LwdbUserDB;
+
 /** 
  * Create a user DB object
  * 
@@ -93,7 +94,7 @@ typedef struct LwdbUserDB {
  * @return A new user DB object, or NULL if somethins wrong, and store
  * error code in err
  */
-LwdbUserDB *lwdb_userdb_new(const char *qqnumber,const char* dir);
+LwdbUserDB *lwdb_userdb_new(const char *qqnumber,const char* dir,int flags);
 
 /** 
  * Free a LwdbUserDB object
@@ -119,8 +120,10 @@ void lwdb_userdb_read_from_client(LwqqClient* from,LwdbUserDB* to);
 void lwdb_userdb_begin(LwdbUserDB* db,const char* transaction);
 void lwdb_userdb_commit(LwdbUserDB* db,const char* transaction);
 void lwdb_userdb_query_qqnumbers(LwqqClient* lc,LwdbUserDB* db);
-void lwdb_userdb_flush_buddies(LwdbUserDB* db,int last);
-void lwdb_userdb_flush_groups(LwdbUserDB* db,int last);
+void lwdb_userdb_flush_buddies(LwdbUserDB* db,int last,int day);
+void lwdb_userdb_flush_groups(LwdbUserDB* db,int last,int day);
+const char*  lwdb_userdb_read(LwdbUserDB* db,const char* key);
+int lwdb_userdb_write(LwdbUserDB* db,const char* key,const char* value);
 /* LwdbUserDB API end */
 
 /************************************************************************/

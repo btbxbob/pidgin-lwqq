@@ -11,7 +11,6 @@
 #define LWQQ_ASYNC_H
 #include "type.h"
 #include "msg.h"
-#include "util.h"
 #include <assert.h>
 
 
@@ -162,9 +161,9 @@ struct _LwqqAsyncOption {
     /* this is you confirmed a friend request 
      * you should add buddy to gui level.
      */
-    void (*request_confirm)(LwqqClient* lc,LwqqBuddy* buddy);
+    void (*new_friend)(LwqqClient* lc,LwqqBuddy* buddy);
+    void (*new_group)(LwqqClient* lc,LwqqGroup* g);
     void (*need_verify2)(LwqqClient* lc,LwqqVerifyCode* code);
-    void (*need_confirm)(LwqqClient* lc,LwqqConfirmTable* table);
     /* this called when successfully delete group from server
      * and the last chance to visit group
      * do not delete group in this function

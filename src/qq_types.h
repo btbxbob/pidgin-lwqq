@@ -1,6 +1,5 @@
 #ifndef QQ_TYPES_H_H
 #define QQ_TYPES_H_H
-typedef struct _AsyncListener AsyncListener;
 
 #include <type.h>
 #include <connection.h>
@@ -13,6 +12,7 @@ typedef struct _AsyncListener AsyncListener;
 #define QQ_USE_FAST_INDEX 1
 #define SUCCESS 0
 #define FAILED -1
+#define BUFLEN 15000
 
 #ifdef UNUSED
 #elif defined(__GNUC__)
@@ -43,10 +43,6 @@ typedef struct _AsyncListener AsyncListener;
 typedef struct {
     enum {NODE_IS_BUDDY,NODE_IS_GROUP} type;
     const void* node;
-    struct qq_extra_info{
-        short page;
-        short total;
-    }info;
 }index_node;
 
 typedef struct qq_account {
@@ -62,15 +58,15 @@ typedef struct qq_account {
     }state;
     int msg_poll_handle;
     GPtrArray* opend_chat;
-    GList* p_buddy_list;///< purple buddy list
     GList* rewrite_pic_list;
-    LwqqRecentList recent_list;
     struct{
     gboolean qq_use_qqnum;
     gboolean disable_custom_font_face;
     gboolean disable_custom_font_size;
     gboolean dark_theme_fix;
     gboolean debug_file_send;
+    gboolean remove_duplicated_msg;
+    gboolean dont_expected_100_continue;
     };
 #if QQ_USE_FAST_INDEX
     struct{

@@ -2,7 +2,7 @@ project(libwebqq)
 cmake_minimum_required(VERSION 2.6)
 set(VERSION_MAJOR "0")
 set(VERSION_MINOR "1")
-set(VERSION_PATCH "b")
+set(VERSION_PATCH "d")
 
 set(CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/cmake ${CMAKE_MODULE_PATH})
 if(NOT CMAKE_INSTALL_PREFIX)
@@ -10,7 +10,7 @@ if(NOT CMAKE_INSTALL_PREFIX)
 endif(NOT CMAKE_INSTALL_PREFIX)
 
 find_package(PkgConfig REQUIRED)
-pkg_check_modules(PURPLE REQUIRED  purple>=2.8.0)
+pkg_check_modules(PURPLE REQUIRED  purple)
 pkg_check_modules(GLIB REQUIRED  glib-2.0)
 pkg_check_modules(CURL REQUIRED libcurl)
 pkg_check_modules(SQLITE REQUIRED sqlite3)
@@ -22,9 +22,17 @@ EXEC_PROGRAM("pkg-config --variable=plugindir purple 2>/dev/null"
     OUTPUT_VARIABLE LIB_INSTALL_DIR)
 EXEC_PROGRAM("pkg-config --variable=datadir purple 2>/dev/null"
     OUTPUT_VARIABLE PURPLE_DATADIR)
+exec_program("pkg-config --modversion purple 2>/dev/null"
+    OUTPUT_VARIABLE PURPLE_VERSION)
 
+message("libpurple version:${PURPLE_VERSION}")
 message("would install to: ${LIB_INSTALL_DIR}")
 message("")
+
+if(PURPLE_VERSION VERSION_LESS "2.8")
+    message("libpurple version outdate")
+    add_definitions(-DPURPLE_OUTDATE=1)
+endif(PURPLE_VERSION VERSION_LESS "2.8")
 
 add_definitions(-DINST_PREFIX="${CMAKE_INSTALL_PREFIX}")
 
@@ -33,17 +41,19 @@ if(NLS)
   find_package(Gettext)
 endif(NLS)
 
-option(WITH_LIBEV "build in libev for async process" On)
+#option(WITH_LIBEV "build in libev for async process" On)
 
-if(WITH_LIBEV)
-    find_package(EV REQUIRED)
-endif(WITH_LIBEV)
+#if(WITH_LIBEV)
+find_package(EV REQUIRED)
+#endif(WITH_LIBEV)
 
 if(VERBOSE)
     add_definitions(-DLWQQ_VERBOSE_LEVEL=${VERBOSE})
 else(VERBOSE)
     add_definitions(-DLWQQ_VERBOSE_LEVEL=0)
 endif(VERBOSE)
+
+option(SSL "Enable SSL Support " On)
 
 add_subdirectory(src)
 add_subdirectory(res)

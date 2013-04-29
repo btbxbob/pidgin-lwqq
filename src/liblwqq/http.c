@@ -9,6 +9,8 @@
 #include "http.h"
 #include "logger.h"
 #include "queue.h"
+#include "util.h"
+#include "internal.h"
 
 #define LWQQ_HTTP_USER_AGENT "Mozilla/5.0 (X11; Linux x86_64; rv:10.0) Gecko/20100101 Firefox/10.0"
 //#define LWQQ_HTTP_USER_AGENT "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.11 (KHTML, like Gecko) Chrome/23.0.1271.91 Safari/537.11"
@@ -29,7 +31,7 @@ static LwqqAsyncEvent* lwqq_http_do_request_async(LwqqHttpRequest *request, int 
 typedef struct GLOBAL {
     CURLM* multi;
     CURLSH* share;
-    pthread_mutex_t share_lock[2];
+    pthread_mutex_t share_lock[3];
     int still_running;
     LwqqAsyncTimer timer_event;
     LIST_HEAD(,D_ITEM) conn_link;
@@ -37,6 +39,29 @@ typedef struct GLOBAL {
     LwqqAsyncIo add_listener;
     LIST_HEAD(,D_ITEM) add_link;
 }GLOBAL;
+
+struct trunk_entry{
+    char* trunk;
+    size_t size;
+    SIMPLEQ_ENTRY(trunk_entry) entries;
+};
+
+static
+TABLE_BEGIN(proxy_map,long,0)
+    TR(LWQQ_HTTP_PROXY_HTTP,     CURLPROXY_HTTP  )
+    TR(LWQQ_HTTP_PROXY_SOCKS4,   CURLPROXY_SOCKS4)
+    TR(LWQQ_HTTP_PROXY_SOCKS5,   CURLPROXY_SOCKS5)
+TABLE_END()
+
+typedef struct LwqqHttpRequest_
+{
+    LwqqHttpRequest parent;
+    int internal_failed;
+    int flags;
+    SIMPLEQ_HEAD(,trunk_entry) trunks;
+}LwqqHttpRequest_;
+
+
 static GLOBAL global = {0};
 static pthread_cond_t async_cond = PTHREAD_COND_INITIALIZER;
 static pthread_mutex_t async_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -62,14 +87,6 @@ typedef struct D_ITEM{
 }D_ITEM;
 /* For async request */
 
-#define slist_free_all(list) \
-while(list!=NULL){ \
-    void *ptr = list; \
-    list = list->next; \
-    s_free(ptr); \
-}
-#define slist_append(list,node) \
-(node->next = list,node)
 
 static int lwqq_gdb_whats_running()
 {
@@ -82,6 +99,35 @@ static int lwqq_gdb_whats_running()
         num++;
     }
     return num;
+}
+
+static void composite_trunks(LwqqHttpRequest* req)
+{
+    LwqqHttpRequest_* req_ = (LwqqHttpRequest_*) req;
+    if(SIMPLEQ_EMPTY(&req_->trunks)) return;
+    size_t size = 0;
+    struct trunk_entry* trunk;
+    SIMPLEQ_FOREACH(trunk,&req_->trunks,entries){
+        size += trunk->size;
+    }
+    req->response = s_malloc0(size+10);
+    req->resp_len = 0;
+    while((trunk = SIMPLEQ_FIRST(&req_->trunks))){
+        SIMPLEQ_REMOVE_HEAD(&req_->trunks,entries);
+        memcpy(req->response+req->resp_len,trunk->trunk,trunk->size);
+        req->resp_len+=trunk->size;
+        s_free(trunk->trunk);
+        s_free(trunk);
+    }
+}
+static void http_clean(LwqqHttpRequest* req)
+{
+    composite_trunks(req);
+    s_free(req->response);
+    req->resp_len = 0;
+    req->http_code = 0;
+    curl_slist_free_all(req->recv_head);
+    req->recv_head = NULL;
 }
 
 static void lwqq_http_set_header(LwqqHttpRequest *request, const char *name,
@@ -187,6 +233,7 @@ void lwqq_http_request_free(LwqqHttpRequest *request)
         return ;
     
     if (request) {
+        composite_trunks(request);
         s_free(request->response);
         s_free(request->location);
         curl_slist_free_all(request->header);
@@ -204,6 +251,7 @@ static size_t write_header( void *ptr, size_t size, size_t nmemb, void *userdata
 {
     char* str = (char*)ptr;
     LwqqHttpRequest* request = (LwqqHttpRequest*) userdata;
+    LwqqHttpRequest_* req_ = (LwqqHttpRequest_*) userdata;
 
     long http_code;
     curl_easy_getinfo(request->req,CURLINFO_RESPONSE_CODE,&http_code);
@@ -226,40 +274,52 @@ static size_t write_header( void *ptr, size_t size, size_t nmemb, void *userdata
         sscanf(str,"Set-Cookie: %[^=]=%[^;];",node->name,node->value);
         request->cookie = slist_append(request->cookie,node);
         LwqqClient* lc = request->lc;
-        if(!lc->cookies) lc->cookies = s_malloc0(sizeof(LwqqCookies));
-        lwqq_set_cookie(lc->cookies, node->name, node->value);
+        if(lc&&!(req_->flags&LWQQ_HTTP_NOT_SET_COOKIE)){
+            if(!lc->cookies) lc->cookies = s_malloc0(sizeof(LwqqCookies));
+            lwqq_set_cookie(lc->cookies, node->name, node->value);
+        }
     }
     return size*nmemb;
 }
-static size_t write_content(void* ptr,size_t size,size_t nmemb,void* userdata)
+static size_t write_content(const char* ptr,size_t size,size_t nmemb,void* userdata)
 {
-    LwqqHttpRequest* request = (LwqqHttpRequest*) userdata;
+    LwqqHttpRequest* req = (LwqqHttpRequest*) userdata;
+    LwqqHttpRequest_* req_ = (LwqqHttpRequest_*) req;
     long http_code;
-    curl_easy_getinfo(request->req,CURLINFO_RESPONSE_CODE,&http_code);
+    size_t sz_ = size*nmemb;
+    curl_easy_getinfo(req->req,CURLINFO_RESPONSE_CODE,&http_code);
     //this is a redirection. ignore it.
     if(http_code == 301||http_code == 302){
-        return size*nmemb;
+        return sz_;
     }
-    int resp_len = request->resp_len;
-    if(request->response==NULL){
-        const char* content_length = request->get_header(request,"Content-Length");
-        if(content_length){
-            size_t length = atol(content_length);
-            request->response = s_malloc0(length+10);
-            request->resp_realloc = 0;
-        }else{
-            request->response = s_malloc0(size*nmemb+10);
-            request->resp_realloc = 1;
+    char* position = NULL;
+    double length = 0.0;
+    curl_easy_getinfo(req->req,CURLINFO_CONTENT_LENGTH_DOWNLOAD,&length);
+    if(req->response==NULL&&SIMPLEQ_EMPTY(&req_->trunks) ){
+        if(length!=-1.0&&length!=0.0){
+            req->response = s_malloc0((unsigned long)(length)+10);
+            position = req->response;
         }
-        resp_len = 0;
-        request->resp_len = 0;
+        req->resp_len = 0;
     }
-    if(request->resp_realloc){
-        request->response = s_realloc(request->response,resp_len+size*nmemb+5);
+    if(req->response){
+        position = req->response+req->resp_len;
+        if(req->resp_len+sz_>(unsigned long)length){
+            req_->internal_failed = 1;
+            //assert(0);
+            lwqq_puts("[http unexpected]\n");
+            return 0;
+        }
+    }else{
+        struct trunk_entry* trunk = s_malloc0(sizeof(*trunk));
+        trunk->size = sz_;
+        trunk->trunk = s_malloc0(sz_);
+        position = trunk->trunk;
+        SIMPLEQ_INSERT_TAIL(&req_->trunks,trunk,entries);
     }
-    memcpy(request->response+resp_len,ptr,size*nmemb);
-    request->resp_len+=size*nmemb;
-    return size*nmemb;
+    memcpy(position,ptr,sz_);
+    req->resp_len+=sz_;
+    return sz_;
 }
 /** 
  * Create a new Http request instance
@@ -275,7 +335,10 @@ LwqqHttpRequest *lwqq_http_request_new(const char *uri)
     }
 
     LwqqHttpRequest *request;
-    request = s_malloc0(sizeof(*request));
+    LwqqHttpRequest_* req_;
+    request = s_malloc0(sizeof(LwqqHttpRequest_));
+    req_ = (LwqqHttpRequest_*)request;
+    SIMPLEQ_INIT(&req_->trunks);
     
     request->req = curl_easy_init();
     request->retry = LWQQ_RETRY_VALUE;
@@ -295,12 +358,13 @@ LwqqHttpRequest *lwqq_http_request_new(const char *uri)
     curl_easy_setopt(request->req,CURLOPT_WRITEDATA,request);
     curl_easy_setopt(request->req,CURLOPT_NOSIGNAL,1);
     curl_easy_setopt(request->req,CURLOPT_FOLLOWLOCATION,1);
-    curl_easy_setopt(request->req,CURLOPT_CONNECTTIMEOUT,10);
+    curl_easy_setopt(request->req,CURLOPT_CONNECTTIMEOUT,20);
     //set normal operate timeout to 30.official value.
     //curl_easy_setopt(request->req,CURLOPT_TIMEOUT,30);
     //5B/s
     curl_easy_setopt(request->req,CURLOPT_LOW_SPEED_LIMIT,8*5);
     curl_easy_setopt(request->req,CURLOPT_LOW_SPEED_TIME,30);
+    curl_easy_setopt(request->req,CURLOPT_SSL_VERIFYPEER,0);
     request->do_request = lwqq_http_do_request;
     request->do_request_async = lwqq_http_do_request_async;
     request->set_header = lwqq_http_set_header;
@@ -433,6 +497,7 @@ LwqqHttpRequest *lwqq_http_create_default_request(LwqqClient* lc,const char *url
     }
 
     lwqq_http_set_default_header(req);
+    lwqq_http_proxy_apply(lwqq_get_http_handle(lc), req);
     req->lc = lc;
     //lwqq_log(LOG_DEBUG, "Create request object for url: %s sucessfully\n", url);
     return req;
@@ -441,15 +506,28 @@ LwqqHttpRequest *lwqq_http_create_default_request(LwqqClient* lc,const char *url
 /************************************************************************/
 /* Those Code for async API */
 
+static void uncompress_response(LwqqHttpRequest* req)
+{
+    char *outdata;
+    char **resp = &req->response;
+    int total = 0;
+
+    outdata = ungzip(*resp, req->resp_len, &total);
+    if (!outdata) return;
+
+    s_free(*resp);
+    /* Update response data to uncompress data */
+    *resp = outdata;
+    req->resp_len = total;
+}
 
 static void async_complete(D_ITEM* conn)
 {
     LwqqHttpRequest* request = conn->req;
-    int have_read_bytes;
+    composite_trunks(request);
     int res;
     char** resp = &request->response;
 
-    have_read_bytes = request->resp_len;
     curl_easy_getinfo(request->req,CURLINFO_RESPONSE_CODE,&request->http_code);
 
     /* NB: *response may null */
@@ -461,24 +539,10 @@ static void async_complete(D_ITEM* conn)
     const char *enc_type = NULL;
     enc_type = lwqq_http_get_header(request, "Content-Encoding");
     if (enc_type && strstr(enc_type, "gzip")) {
-        char *outdata;
-        int total = 0;
-        
-        outdata = ungzip(*resp, have_read_bytes, &total);
-        outdata[total] = '\0';
-        if (!outdata) {
-            goto failed;
-        }
-
-        s_free(*resp);
-        /* Update response data to uncompress data */
-        *resp = s_strdup(outdata);
-        (*resp)[total] = '\0';
-        s_free(outdata);
-        have_read_bytes = total;
-        request->resp_len = total;
+        uncompress_response(request);
     }
 failed:
+    if(conn->req)conn->req->failcode = conn->event->failcode;
     vp_do(conn->cmd,&res);
     lwqq_async_event_set_result(conn->event,res);
     lwqq_async_event_finish(conn->event);
@@ -492,6 +556,7 @@ static void check_multi_info(GLOBAL *g)
     int msgs_left;
     D_ITEM *conn;
     LwqqHttpRequest* req;
+    LwqqHttpRequest_* req_;
     LwqqAsyncEvent* ev;
     CURL *easy;
     CURLcode ret;
@@ -503,22 +568,28 @@ static void check_multi_info(GLOBAL *g)
             ret = msg->data.result;
             curl_easy_getinfo(easy, CURLINFO_PRIVATE, &conn);
             req = conn->req;
+            req_ = (LwqqHttpRequest_*) req;
             ev = conn->event;
             if(ret != 0){
                 lwqq_log(LOG_WARNING,"async retcode:%d\n",ret);
             }
-            if(ret == CURLE_OPERATION_TIMEDOUT){
+            if(ret != CURLE_OK){
+                if(ret == CURLE_ABORTED_BY_CALLBACK && !req_->internal_failed){
+                    ev->failcode = LWQQ_CALLBACK_CANCELED;
+                }
                 req->retry --;
-                if(req->retry == 0){
-                    ev->failcode = LWQQ_CALLBACK_TIMEOUT;
-                }else{
+                if(req->retry > 0){
                     //re add it to libcurl
+                    req_->internal_failed = 0;
                     curl_multi_remove_handle(g->multi, easy);
+                    http_clean(req);
                     curl_multi_add_handle(g->multi, easy);
                     continue;
                 }
-            }else if(ret == CURLE_ABORTED_BY_CALLBACK){
-                ev->failcode = LWQQ_CALLBACK_CANCELED;
+                if(ret == CURLE_OPERATION_TIMEDOUT)
+                    ev->failcode = LWQQ_CALLBACK_TIMEOUT;
+                else
+                    ev->failcode = LWQQ_CALLBACK_FAILED;
             }
 
             curl_multi_remove_handle(g->multi, easy);
@@ -552,7 +623,7 @@ static void timer_cb(LwqqAsyncTimerHandle timer,void* data)
 static int multi_timer_cb(CURLM *multi, long timeout_ms, void *userp)
 {
     //lwqq_log(LOG_NOTICE,"multi_timer,timeout:%ld\n",timeout_ms);
-    lwqq_verbose(4,"multi_timer,timeout:%ld\n",timeout_ms);
+    lwqq_verbose(5,"multi_timer,timeout:%ld\n",timeout_ms);
     //this function call only when timeout clock '''changed'''.
     //called by curl
     GLOBAL* g = userp;
@@ -661,14 +732,7 @@ static LwqqAsyncEvent* lwqq_http_do_request_async(LwqqHttpRequest *request, int 
     char **resp = &request->response;
 
     /* Clear off last response */
-    if (*resp) {
-        s_free(*resp);
-        *resp = NULL;
-        request->http_code = 0;
-        request->resp_len = 0;
-        curl_slist_free_all(request->recv_head);
-        request->recv_head = NULL;
-    }
+    http_clean(request);
 
     /* Set http method */
     if (method==0){
@@ -708,21 +772,15 @@ static int lwqq_http_do_request(LwqqHttpRequest *request, int method, char *body
     if (!request->req)
         return -1;
     CURLcode ret;
+    LwqqHttpRequest_* req_ = (LwqqHttpRequest_*) request;
 retry:
     ret=0;
+    req_->internal_failed = 0;
 
-    int have_read_bytes = 0;
     char **resp = &request->response;
 
     /* Clear off last response */
-    if (*resp) {
-        s_free(*resp);
-        *resp = NULL;
-        request->http_code = 0;
-        request->resp_len = 0;
-        curl_slist_free_all(request->recv_head);
-        request->recv_head = NULL;
-    }
+    http_clean(request);
 
     /* Set http method */
     if (method==0){
@@ -735,24 +793,22 @@ retry:
     }
 
     ret = curl_easy_perform(request->req);
-    //perduce timeout.
-    if(ret == CURLE_OPERATION_TIMEDOUT ){
-        lwqq_log(LOG_WARNING,"do_request timeout\n");
-        request->retry --;
-        if(request->retry == 0){
-            lwqq_log(LOG_WARNING,"do_request retry used out\n");
-            return LWQQ_EC_TIMEOUT_OVER;
-        }
-        goto retry;
-    }
-    if(ret == CURLE_ABORTED_BY_CALLBACK ){
-    }
+    composite_trunks(request);
     if(ret != CURLE_OK){
         lwqq_log(LOG_ERROR,"do_request fail curlcode:%d\n",ret);
-        return ret;
+        if(ret == CURLE_ABORTED_BY_CALLBACK && !req_->internal_failed){
+            return LWQQ_EC_CANCELED;
+        }
+        request->retry -- ;
+        if(request->retry > 0){
+            goto retry;
+        }
+        if(ret == CURLE_OPERATION_TIMEDOUT)
+            return LWQQ_EC_TIMEOUT_OVER;
+        else return LWQQ_EC_NETWORK_ERROR;
     }
+    //perduce timeout.
     request->retry = LWQQ_RETRY_VALUE;
-    have_read_bytes = request->resp_len;
     curl_easy_getinfo(request->req,CURLINFO_RESPONSE_CODE,&request->http_code);
 
     // NB: *response may null 
@@ -765,19 +821,7 @@ retry:
     const char *enc_type = NULL;
     enc_type = lwqq_http_get_header(request, "Content-Encoding");
     if (enc_type && strstr(enc_type, "gzip")) {
-        char *outdata;
-        int total = 0;
-        
-        outdata = ungzip(*resp, have_read_bytes, &total);
-        if (!outdata) {
-            goto failed;
-        }
-
-        s_free(*resp);
-        /* Update response data to uncompress data */
-        *resp = s_strdup(outdata);
-        s_free(outdata);
-        have_read_bytes = total;
+        uncompress_response(request);
     }
 
     return 0;
@@ -796,9 +840,12 @@ static void share_lock(CURL* handle,curl_lock_data data,curl_lock_access access,
     if(access == CURL_LOCK_ACCESS_SHARED) return;
     GLOBAL* g = userptr;
     int idx;
-    if(data == CURL_LOCK_DATA_DNS) idx=0;
-    else if(data == CURL_LOCK_DATA_CONNECT) idx=1;
-    else return;
+    switch(data){
+        case CURL_LOCK_DATA_DNS:idx=0;break;
+        case CURL_LOCK_DATA_CONNECT:idx=1;break;
+        case CURL_LOCK_DATA_SSL_SESSION:idx=2;break;
+        default:return;
+    }
     pthread_mutex_lock(&g->share_lock[idx]);
 
 }
@@ -806,14 +853,21 @@ static void share_unlock(CURL* handle,curl_lock_data data,void* userptr)
 {
     GLOBAL* g = userptr;
     int idx;
-    if(data == CURL_LOCK_DATA_DNS) idx=0;
-    else if(data == CURL_LOCK_DATA_CONNECT) idx=1;
-    else return;
+    switch(data){
+        case CURL_LOCK_DATA_DNS:idx=0;break;
+        case CURL_LOCK_DATA_CONNECT:idx=1;break;
+        case CURL_LOCK_DATA_SSL_SESSION:idx=2;break;
+        default:return;
+    }
     pthread_mutex_unlock(&g->share_lock[idx]);
 }
 void lwqq_http_global_init()
 {
     if(global.multi==NULL){
+        curl_global_init(CURL_GLOBAL_ALL);
+//#if LWQQ_ENABLE_SSL
+        //signal(SIGPIPE,SIG_IGN);
+//#endif
         global.multi = curl_multi_init();
         curl_multi_setopt(global.multi,CURLMOPT_SOCKETFUNCTION,sock_cb);
         curl_multi_setopt(global.multi,CURLMOPT_SOCKETDATA,&global);
@@ -827,11 +881,13 @@ void lwqq_http_global_init()
         CURLSH* share = global.share;
         curl_share_setopt(share,CURLSHOPT_SHARE,CURL_LOCK_DATA_DNS);
         curl_share_setopt(share,CURLSHOPT_SHARE,CURL_LOCK_DATA_CONNECT);
+        curl_share_setopt(share,CURLSHOPT_SHARE,CURL_LOCK_DATA_SSL_SESSION);
         curl_share_setopt(share,CURLSHOPT_LOCKFUNC,share_lock);
         curl_share_setopt(share,CURLSHOPT_UNLOCKFUNC,share_unlock);
         curl_share_setopt(share,CURLSHOPT_USERDATA,&global);
         pthread_mutex_init(&global.share_lock[0],NULL);
         pthread_mutex_init(&global.share_lock[1],NULL);
+        pthread_mutex_init(&global.share_lock[2],NULL);
     }
 }
 
@@ -861,8 +917,8 @@ void lwqq_http_global_free()
         LIST_FOREACH_SAFE(item,&global.conn_link,entries,tvar){
             LIST_REMOVE(item,entries);
             //let callback delete data
+            item->req->failcode = item->event->failcode = LWQQ_CALLBACK_CANCELED;
             vp_do(item->cmd,NULL);
-            lwqq_async_event_set_code(item->event,LWQQ_CALLBACK_FAILED);
             lwqq_async_event_finish(item->event);
             s_free(item);
         }
@@ -873,12 +929,14 @@ void lwqq_http_global_free()
         close(global.pipe_fd[1]);
         lwqq_async_timer_stop(&global.timer_event);
         memset(&global.timer_event,sizeof(LwqqAsyncTimer),0);
+        curl_global_cleanup();
     }
     if(global.share){
         curl_share_cleanup(global.share);
         global.share = NULL;
         pthread_mutex_destroy(&global.share_lock[0]);
         pthread_mutex_destroy(&global.share_lock[1]);
+        pthread_mutex_destroy(&global.share_lock[2]);
     }
 }
 void lwqq_http_cleanup(LwqqClient*lc)
@@ -895,9 +953,9 @@ void lwqq_http_cleanup(LwqqClient*lc)
         LIST_FOREACH_SAFE(item,&global.conn_link,entries,tvar){
             if(item->req->lc != lc) continue;
             LIST_REMOVE(item,entries);
+            item->req->failcode = item->event->failcode = LWQQ_CALLBACK_CANCELED;
             //let callback delete data
             vp_do(item->cmd,NULL);
-            lwqq_async_event_set_code(item->event,LWQQ_CALLBACK_FAILED);
             lwqq_async_event_finish(item->event);
             s_free(item);
         }
@@ -985,8 +1043,11 @@ void lwqq_http_on_progress(LwqqHttpRequest* req,LWQQ_PROGRESS progress,void* pro
 
 void lwqq_http_set_option(LwqqHttpRequest* req,LwqqHttpOption opt,...)
 {
+    if(!req) return;
+    LwqqHttpRequest_* req_ = (LwqqHttpRequest_*) req;
     va_list args;
     va_start(args,opt);
+    long val=0;
     switch(opt){
         case LWQQ_HTTP_TIMEOUT:
             curl_easy_setopt(req->req,CURLOPT_LOW_SPEED_TIME,va_arg(args,unsigned long));
@@ -1008,10 +1069,45 @@ void lwqq_http_set_option(LwqqHttpRequest* req,LwqqHttpOption opt,...)
             if(va_arg(args,long)&&req->progress_func==NULL)
                 lwqq_http_on_progress(req, NULL, NULL);
             break;
+        default:
+            val = va_arg(args,long);
+            val?(req_->flags&=opt):(req_->flags|=~opt);
+            break;
     }
     va_end(args);
 }
 void lwqq_http_cancel(LwqqHttpRequest* req)
 {
     req->retry = 0;
+}
+void lwqq_http_handle_remove(LwqqHttpHandle* http)
+{
+    if(http){
+        s_free(http->proxy.username);
+        s_free(http->proxy.password);
+        s_free(http->proxy.host);
+    }
+}
+void lwqq_http_proxy_apply(LwqqHttpHandle* handle,LwqqHttpRequest* req)
+{
+    CURL* c = req->req;
+    char* v;
+    long l;
+    if(handle->proxy.type == LWQQ_HTTP_PROXY_NOT_SET){
+        return;
+    }else if(handle->proxy.type == LWQQ_HTTP_PROXY_NONE){
+        curl_easy_setopt(c, CURLOPT_PROXY,"");
+    }else{
+        l = handle->proxy.type;
+        curl_easy_setopt(c, CURLOPT_PROXYTYPE,proxy_map(l));
+        v = handle->proxy.username;
+        if(v) curl_easy_setopt(c, CURLOPT_PROXYUSERNAME,v);
+        v = handle->proxy.password;
+        if(v) curl_easy_setopt(c, CURLOPT_PROXYPASSWORD,v);
+        v = handle->proxy.host;
+        if(v) curl_easy_setopt(c, CURLOPT_PROXY,v);
+        l = handle->proxy.port;
+        if(l) curl_easy_setopt(c, CURLOPT_PROXYPORT, l);
+    }
+    curl_easy_setopt(c, CURLOPT_PROXYTYPE,handle->proxy.type);
 }

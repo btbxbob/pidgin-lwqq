@@ -22,6 +22,8 @@
  */
 void lwqq_login(LwqqClient *client, LwqqStatus status,LwqqErrorCode *err);
 
+LwqqAsyncEvent* lwqq_relogin(LwqqClient* lc);
+
 /** 
  * WebQQ logout function
  * 
@@ -29,8 +31,5 @@ void lwqq_login(LwqqClient *client, LwqqStatus status,LwqqErrorCode *err);
  * @param err Error code
  */
 void lwqq_logout(LwqqClient *client, LwqqErrorCode *err);
-
-//LwqqAsyncEvent* lwqq_fill_url(LwqqClient* lc,const char* url,LwqqString* str);
-
 
 #endif  /* LWQQ_LOGIN_H */
