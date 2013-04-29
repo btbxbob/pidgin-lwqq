@@ -137,7 +137,7 @@ const char* HTML_SYMBOL = "<[^>]+>|&amp;|&quot;|&gt;|&lt;";
 static char* build_smiley_exp()
 {
     char* exp = s_malloc0(2048);
-    char* spec_char = "()[]*$\\|";
+    char* spec_char = "()[]*$\\|+";
     //<IMG ID=''> is belongs to <.*?>
     //first html label .then smiley
     strcpy(exp,"<[^>]+>|\\[FACE_\\d+\\]|/\\S+");
@@ -345,6 +345,30 @@ int translate_message_to_struct(LwqqClient* lc,const char* to,const char* what,L
 static void paste_content_string(const char* from,char* to)
 {
     const char* read = from;
+    const char* ptr = read;
+    char* write = to;
+    size_t n = 0;
+    while((ptr = strpbrk(read,"<>&\""))){
+        if(ptr>read){
+            n = ptr-read;
+            strncpy(write,read,n);
+            write += n;
+        }
+        switch(*ptr){
+            case '<' : strcpy(write,"&lt;");break;
+            case '>' : strcpy(write,"&gt;");break;
+            case '&' : strcpy(write,"&amp;");break;
+            case '"' : strcpy(write,"&quot;");break;
+        }
+        read = ptr+1;
+        write+=strlen(write);
+    }
+    if(*read != '\0'){
+        strcpy(write,read);
+        write+=strlen(read);
+    }
+    *write = '\0';
+    /*const char* read = from;
     char* write = to;
     size_t idx;
     while(*read!='\0'){
@@ -366,6 +390,13 @@ static void paste_content_string(const char* from,char* to)
         write+=strlen(write);
     }
     *write='\0';
+    */
+}
+char* translate_to_html_symbol(const char* s)
+{
+    char buf[2048] = {0};
+    paste_content_string(s, buf);
+    return s_strdup(buf);
 }
 void translate_struct_to_message(qq_account* ac, LwqqMsgMessage* msg, char* buf)
 {
@@ -375,9 +406,11 @@ void translate_struct_to_message(qq_account* ac, LwqqMsgMessage* msg, char* buf)
     if(msg->f_style.i==1) strcat(buf,"<i>");
     if(msg->f_style.u==1) strcat(buf,"<u>");
     snprintf(buf+strlen(buf),300,"<font ");
-    if(ac->dark_theme_fix && !strcmp("000000", msg->f_color))
-        snprintf(buf+strlen(buf),300,"color=\"#ffffff\" ");
-    else
+    if(ac->dark_theme_fix ){
+        int c = strtoul(msg->f_color, NULL, 16);
+        int t = (c==0)?0xffffff:(c%256)/2+128+((c/256%256)/2+128)*256+((c/256/256%256)/2+128)*256*256;
+        snprintf(buf+strlen(buf),300,"color=\"#%x\" ",t);
+    }else
         snprintf(buf+strlen(buf),300,"color=\"#%s\" ",msg->f_color);
     if(!ac->disable_custom_font_face&&msg->f_name)
         snprintf(buf+strlen(buf),300,"face=\"%s\" ",msg->f_name);
@@ -591,6 +624,18 @@ void translate_global_free()
 }
 const char* translate_smile(int face)
 {
+    static char buf[64];
+    struct smile_entry* entry = &smile_tables[0];
+    while(entry->id != face&&entry->id!=-1){
+        entry++;
+    }
+    buf[0]=0;
+    if(entry->id!=-1){
+        strncpy(buf,entry->smile[0],sizeof(buf));
+        if(buf[0]=='/') strcat(buf," ");
+    }
+    return buf;
+    /*
 #define SMILE_MAP(face,str) \
     case face:\
     ret=str;\
@@ -621,6 +666,7 @@ const char* translate_smile(int face)
     }
     return ret;
 #undef SMILE_MAP
+*/
 }
 
 void add_smiley(void* data,void* userdata)

@@ -30,17 +30,11 @@
 #include "url.h"
 #include "json.h"
 #include "async.h"
+#include "internal.h"
 
 /* URL for webqq login */
-#define LWQQ_URL_LOGIN_HOST "http://ptlogin2.qq.com"
-#define LWQQ_URL_CHECK_HOST "http://check.ptlogin2.qq.com"
-#define LWQQ_URL_VERIFY_IMG "http://captcha.qq.com/getimage?aid=%s&uin=%s"
-#define VCCHECKPATH "/check"
 #define APPID "1003903"
-#define LWQQ_URL_SET_STATUS "http://d.web2.qq.com/channel/login2"
 
-/* URL for get webqq version */
-#define LWQQ_URL_VERSION "http://ui.ptlogin2.qq.com/cgi-bin/ver"
 
 static LwqqAsyncEvent* set_online_status(LwqqClient *lc,const char *status);
 static int get_version_back(LwqqHttpRequest* req);
@@ -80,8 +74,8 @@ static LwqqAsyncEvent* get_verify_code(LwqqClient *lc,const char* appid)
     char url[512];
     char chkuin[64];
 
-    snprintf(url, sizeof(url), "%s%s?uin=%s&appid=%s", LWQQ_URL_CHECK_HOST,
-             VCCHECKPATH, lc->username, appid);
+    snprintf(url, sizeof(url), WEBQQ_CHECK_HOST"/check?uin=%s&appid=%s",
+             lc->username, appid);
     req = lwqq_http_create_default_request(lc,url,NULL);
     lwqq_verbose(3,"%s\n",url);
     
@@ -183,7 +177,7 @@ static LwqqAsyncEvent* get_verify_image(LwqqClient *lc)
     char chkuin[64];
     LwqqErrorCode err;
  
-    snprintf(url, sizeof(url), LWQQ_URL_VERIFY_IMG, APPID, lc->username);
+    snprintf(url, sizeof(url), WEBQQ_CAPTCHA_HOST"/getimage?aid=%s&uin=%s", APPID, lc->username);
     req = lwqq_http_create_default_request(lc,url, &err);
      
     snprintf(chkuin, sizeof(chkuin), "chkuin=%s", lc->username);
@@ -318,12 +312,13 @@ static LwqqAsyncEvent* do_login(LwqqClient *lc, const char *md5, LwqqErrorCode *
     char url[1024];
     LwqqHttpRequest *req;
     
-    snprintf(url, sizeof(url), "%s/login?u=%s&p=%s&verifycode=%s&"
+    snprintf(url, sizeof(url), WEBQQ_LOGIN_HOST"/login?"
+            "u=%s&p=%s&verifycode=%s&"
              "webqq_type=%d&remember_uin=1&aid=1003903&login2qq=1&"
              "u1=http%%3A%%2F%%2Fweb.qq.com%%2Floginproxy.html"
              "%%3Flogin2qq%%3D1%%26webqq_type%%3D10&h=1&ptredirect=0&"
              "ptlang=2052&from_ui=1&pttype=1&dumy=&fp=loginerroralert&"
-             "action=2-11-7438&mibao_css=m_webqq&t=1&g=1", LWQQ_URL_LOGIN_HOST, lc->username, md5, lc->vc->str,lc->stat);
+             "action=2-11-7438&mibao_css=m_webqq&t=1&g=1",  lc->username, md5, lc->vc->str,lc->stat);
 
     req = lwqq_http_create_default_request(lc,url, err);
     lwqq_verbose(3,"%s\n",url);
@@ -349,8 +344,14 @@ static int do_login_back(LwqqHttpRequest* req)
         sscanf(beg,"%[^']",lc->error_description);
         goto done;
     }
+    if(req->response == NULL){
+        lwqq_puts("login no response\n");
+        err = LWQQ_EC_NETWORK_ERROR;
+        goto done;
+    }
 
     response = req->response;
+    lwqq_verbose(3,"%s\n",response);
     char *p = strstr(response, "\'");
     if (!p) {
         err = LWQQ_EC_ERROR;
@@ -441,10 +442,10 @@ static LwqqAsyncEvent* get_version(LwqqClient *lc, LwqqErrorCode *err)
 {
     LwqqHttpRequest *req;
 
-    req = lwqq_http_create_default_request(lc,LWQQ_URL_VERSION, err);
+    req = lwqq_http_create_default_request(lc,WEBQQ_VERSION_URL, err);
 
     /* Send request */
-    lwqq_log(LOG_DEBUG, "Get webqq version from %s\n", LWQQ_URL_VERSION);
+    lwqq_log(LOG_DEBUG, "Get webqq version from %s\n", WEBQQ_VERSION_URL);
     return  req->do_request_async(req, 0, NULL,_C_(p_i,get_version_back,req));
 }
 static int get_version_back(LwqqHttpRequest* req)
@@ -537,11 +538,12 @@ static LwqqAsyncEvent* set_online_status(LwqqClient *lc,const char *status)
     s_free(buf);
 
     /* Create a POST request */
-    req = lwqq_http_create_default_request(lc,LWQQ_URL_SET_STATUS, NULL);
+    req = lwqq_http_create_default_request(lc,WEBQQ_D_HOST"/channel/login2", NULL);
 
+    lwqq_puts("[set online status]\n");
     /* Set header needed by server */
     req->set_header(req, "Cookie2", "$Version=1");
-    req->set_header(req, "Referer", "http://d.web2.qq.com/proxy.html?v=20101025002");
+    req->set_header(req, "Referer", WEBQQ_D_REF_URL);
     req->set_header(req, "Content-type", "application/x-www-form-urlencoded");
     
     /* Set http cookie */
@@ -643,6 +645,7 @@ void lwqq_login(LwqqClient *client, LwqqStatus status,LwqqErrorCode *err)
 
     client->stat = status;
 
+    lwqq_puts("[login stage 1:get webqq version]\n");
     /* First: get webqq version */
     LwqqAsyncEvent* ev = get_version(client, err);
     lwqq_async_add_event_listener(ev,_C_(p,login_stage_2,ev));
@@ -778,8 +781,9 @@ void lwqq_logout(LwqqClient *client, LwqqErrorCode *err)
     re = tv.tv_usec / 1000;
     re += tv.tv_sec;
     
-    snprintf(url, sizeof(url), "%s/channel/logout2?clientid=%s&psessionid=%s&t=%ld",
-             "http://d.web2.qq.com", client->clientid, client->psessionid, re);
+    snprintf(url, sizeof(url), WEBQQ_D_HOST"/channel/logout2"
+            "?clientid=%s&psessionid=%s&t=%ld",
+             client->clientid, client->psessionid, re);
 
     /* Create a GET request */
     req = lwqq_http_create_default_request(client,url, err);
@@ -788,7 +792,7 @@ void lwqq_logout(LwqqClient *client, LwqqErrorCode *err)
     }
 
     /* Set header needed by server */
-    req->set_header(req, "Referer", "http://ptlogin2.qq.com/proxy.html?v=20101025002");
+    req->set_header(req, "Referer", WEBQQ_LOGIN_REF_URL);
     
     /* Set http cookie */
     req->set_header(req, "Cookie", lwqq_get_cookies(client));
@@ -840,15 +844,44 @@ done:
     client->stat = LWQQ_STATUS_LOGOUT;
 }
 
-#if 0
-LwqqAsyncEvent* lwqq_fill_url(LwqqClient* client,const char* url,LwqqString* str)
+static int process_login2(LwqqHttpRequest* req)
 {
-    //get_verify_code(lc, "10019");
-    char buf[8192];
-    char* md5 = lwqq_enc_pwd(client->password, "!STE", client->username);
-    snprintf(buf,sizeof(buf),"http://ptlogin2.qq.com/login?u=%s&p=%s&verifycode=!STE&aid=1006102&ul=http://id.qq.com/index.html&ptredirect=1&ptlang=2052",client->username,md5);
-    s_free(md5);
-    str->str = s_strdup(buf);
-    return NULL;
+    /*
+     * {"retcode":0,"result":{"uin":2501542492,"cip":3396791469,"index":1075,"port":49648,"status":"online","vfwebqq":"8e6abfdb20f9436be07e652397a1197553f49fabd3e67fc88ad7ee4de763f337e120fdf7036176c9","psessionid":"8368046764001d636f6e6e7365727665725f77656271714031302e3133392e372e31363000003bce00000f8a026e04005c821a956d0000000a407646664c41737a42416d000000288e6abfdb20f9436be07e652397a1197553f49fabd3e67fc88ad7ee4de763f337e120fdf7036176c9","user_state":0,"f":0}}
+     */
+    int err = 0;
+    LwqqClient* lc = req->lc;
+    json_t* root = NULL,*result;
+    lwqq__jump_if_http_fail(req,err);
+    lwqq__jump_if_json_fail(root,req->response,err);
+    result = lwqq__parse_retcode_result(root, &err);
+    if(err!=WEBQQ_OK) goto done;
+    if(result){
+        lwqq__override(lc->cip,lwqq__json_get_value(result,"cip"));
+        lwqq__override(lc->index,lwqq__json_get_value(result,"index"));
+        lwqq__override(lc->port,lwqq__json_get_value(result,"port"));
+        lwqq__override(lc->psessionid,lwqq__json_get_value(result,"psessionid"));
+        lc->stat = lwqq_status_from_str(json_parse_simple_value(result, "status"));
+        lwqq__override(lc->vfwebqq,lwqq__json_get_value(result,"vfwebqq"));
+    }
+done:
+    lwqq__clean_json_and_req(root,req);
+    return err;
 }
-#endif
+
+LwqqAsyncEvent* lwqq_relogin(LwqqClient* lc)
+{
+    if(!lc) return NULL;
+    char url[128];
+    char post[512];
+    if(!lc->new_ptwebqq) lc->new_ptwebqq = s_strdup(lc->cookies->ptwebqq);
+    snprintf(url, sizeof(url), WEBQQ_D_HOST"/channel/login2");
+    snprintf(post, sizeof(post), "r={\"status\":\"%s\",\"ptwebqq\":\"%s\",\"passwd_sig\":\"\",\"clientid\":\"%s\",\"psessionid\":\"%s\"}",lwqq_status_to_str(lc->stat),lc->new_ptwebqq,lc->clientid,lc->psessionid);
+    lwqq_verbose(3,"%s\n",url);
+    lwqq_verbose(3,"%s\n",post);
+    LwqqHttpRequest* req = lwqq_http_create_default_request(lc, url, NULL);
+    req->set_header(req,"Referer",WEBQQ_D_REF_URL);
+    lwqq_set_cookie(lc->cookies, "ptwebqq", lc->new_ptwebqq);
+    req->set_header(req,"Cookie",lwqq_get_cookies(lc));
+    return req->do_request_async(req,1,post,_C_(p_i,process_login2,req));
+}

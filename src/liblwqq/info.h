@@ -89,6 +89,8 @@ LwqqAsyncEvent* lwqq_info_get_friend_detail_info(LwqqClient *lc, LwqqBuddy *budd
 
 
 LwqqAsyncEvent* lwqq_info_get_avatar(LwqqClient* lc,LwqqBuddy* buddy,LwqqGroup* group);
+
+LwqqErrorCode lwqq_info_save_avatar(LwqqBuddy* b,LwqqGroup* g,const char* path);
 /** 
  * Get all friends qqnumbers
  * 
@@ -157,7 +159,7 @@ LwqqAsyncEvent* lwqq_info_mask_group(LwqqClient* lc,LwqqGroup* group,LwqqMask ma
  * when succees. lwqq would fill out necessary info.
  * note lwqq would call async_opt->need_verify to process captcha
  */
-LwqqAsyncEvent* lwqq_info_search_friend_by_qq(LwqqClient* lc,const char* qq,LwqqBuddy* out);
+LwqqAsyncEvent* lwqq_info_search_friend(LwqqClient* lc,const char* qq_email,LwqqBuddy* out);
 /**@param out : use what you get in lwqq_info_search_friend_by_qq. and you can add other info
  * such as cate_index
  * @param message : the extra reason .
@@ -185,7 +187,24 @@ LwqqAsyncEvent* lwqq_info_get_stranger_info(LwqqClient* lc,LwqqMsgSysGMsg* msg,L
  *                 if answer is no . then there is reason.
  */
 LwqqAsyncEvent* lwqq_info_answer_request_join_group(LwqqClient* lc,LwqqMsgSysGMsg* msg ,LwqqAnswer answer,const char* reason);
-LwqqAsyncEvent* lwqq_info_answer_request_friend(LwqqClient* lc,const char* qq,LwqqAllow allow,const char* extra);
+/**
+ * get a group member detail
+ * @param serv_id: the uin for LwqqSimpleBuddy
+ * @param out: use lwqq_buddy_new() to create a new empty buddy.
+ *             if successed.necessary infomation would fill into this.
+ *             free it after used.
+ */
+LwqqAsyncEvent* lwqq_info_get_group_member_detail(LwqqClient* lc,const char* serv_id,LwqqBuddy* out);
+/**
+ * add a group member as friend
+ * @param mem_detail : you should create a empty buddy and make sure use this function after both
+ *                     lwqq_info_get_group_member_detail and lwqq_info_get_friend_qqnumber
+ *                     if successed. mem_detail would added into LwqqClient
+ *                     if failed. it would be freed by lwqq
+ *                     so never free it by your self.
+ */
+LwqqAsyncEvent* lwqq_info_add_group_member_as_friend(LwqqClient* lc,LwqqBuddy* mem_detail,const char* markname);
+LwqqAsyncEvent* lwqq_info_answer_request_friend(LwqqClient* lc,const char* qq,LwqqAnswer allow,const char* extra);
 
 LwqqAsyncEvent* lwqq_info_get_group_public(LwqqClient* lc,LwqqGroup* g);
 void lwqq_card_free(LwqqBusinessCard* card);
@@ -196,5 +215,14 @@ LwqqAsyncEvent* lwqq_info_get_group_memo(LwqqClient* lc,LwqqGroup* g);
 LwqqAsyncEvent* lwqq_info_set_dicsu_topic(LwqqClient* lc,LwqqGroup* d,const char* topic);
 void lwqq_recent_list_free(LwqqRecentList* list);
 LwqqAsyncEvent* lwqq_info_recent_list(LwqqClient* lc,LwqqRecentList* list);
+LwqqAsyncEvent* lwqq_info_qq_get_level(LwqqClient* lc,LwqqBuddy* b);
+
+typedef struct LwqqDiscuMemChange LwqqDiscuMemChange;
+LwqqDiscuMemChange* lwqq_discu_mem_change_new();
+void lwqq_discu_mem_change_free(LwqqDiscuMemChange* chg);
+LwqqErrorCode lwqq_discu_add_buddy(LwqqDiscuMemChange* mem,LwqqBuddy* b);
+LwqqErrorCode lwqq_discu_add_group_member(LwqqDiscuMemChange* mem,LwqqSimpleBuddy* sb,LwqqGroup* g);
+LwqqAsyncEvent* lwqq_info_change_discu_mem(LwqqClient* lc,LwqqGroup* discu,LwqqDiscuMemChange* chg);
+LwqqAsyncEvent* lwqq_info_create_discu(LwqqClient* lc,LwqqDiscuMemChange* chg,const char* dname);
 
 #endif  /* LWQQ_INFO_H */

@@ -55,8 +55,8 @@ typedef int (*LWQQ_PROGRESS)(void* data,size_t now,size_t total);
  */
 
 typedef enum {
-    LWQQ_CALLBACK_FAILED = 0x0,
     LWQQ_CALLBACK_VALID,
+    LWQQ_CALLBACK_FAILED,
     LWQQ_CALLBACK_TIMEOUT,
     LWQQ_CALLBACK_CANCELED,
 }LwqqCallbackCode;
@@ -103,6 +103,7 @@ typedef enum {
 /* Lwqq Error Code */
 typedef enum {
     LWQQ_EC_ERROR = -1,                 //<general error
+    LWQQ_EC_NO_RESULT = -2,
     //old uncleard api
     LWQQ_EC_OK = 0,
     LWQQ_EC_NULL_POINTER,
@@ -113,8 +114,8 @@ typedef enum {
     LWQQ_EC_HTTP_ERROR = 30,
     LWQQ_EC_DB_EXEC_FAIELD = 50,
     LWQQ_EC_DB_CLOSE_FAILED,
-    LWQQ_EC_NO_RESULT,
-    LWQQ_EC_TIMEOUT_OVER
+    LWQQ_EC_TIMEOUT_OVER,
+    LWQQ_EC_CANCELED
 } LwqqErrorCode;
 
 /* Struct defination */
@@ -159,12 +160,17 @@ typedef struct LwqqBuddy {
     //extra data
     char *avatar;
     size_t avatar_len;
+    time_t last_modify;
     char *token;                /**< Only used in add friend */
+    //char *uiuin;                /**< Only used in add friend */
     void *data;                 /**< user defined data */
-    short page;
+    int level;
+    //short page;
     //pthread_mutex_t mutex;
     LIST_ENTRY(LwqqBuddy) entries; /* FIXME: Do we really need this? */
 } LwqqBuddy;
+
+
 typedef LIST_HEAD(LwqqFriendList,LwqqBuddy) 
     LwqqFriendList;
 typedef struct LwqqSimpleBuddy{
@@ -212,6 +218,7 @@ typedef struct LwqqGroup {
 
     char *group_sig;            /** < use in sess msg */
 
+    time_t last_modify;
     char *avatar;
     size_t avatar_len;
     void *data;                 /** < user defined data */
@@ -235,8 +242,8 @@ typedef struct LwqqVerifyCode {
     LwqqCommand cmd;
 } LwqqVerifyCode ;
 
-typedef enum {LWQQ_NO,LWQQ_YES} LwqqAnswer;
-typedef enum {LWQQ_DENY,LWQQ_ALLOW,LWQQ_ALLOW_AND_ADD} LwqqAllow;
+typedef enum {LWQQ_NO,LWQQ_YES,LWQQ_EXTRA_ANSWER,LWQQ_IGNORE} LwqqAnswer;
+#define LWQQ_ALLOW_AND_ADD LWQQ_EXTRA_ANSWER
 
 typedef struct LwqqCookies {
     char *ptvfsession;          /**< ptvfsession */
@@ -337,6 +344,7 @@ void lwqq_vc_free(LwqqVerifyCode *vc);
  * @param client LwqqClient instance
  */
 void lwqq_client_free(LwqqClient *client);
+void* lwqq_get_http_handle(LwqqClient* lc);
 
 /* LwqqClient API end */
 
@@ -426,6 +434,10 @@ snprintf(str+strlen(str),sizeof(str)-strlen(str),##format)
 
 const char* lwqq_status_to_str(LwqqStatus status);
 LwqqStatus lwqq_status_from_str(const char* str);
+
+//long time
+#define LTIME lwqq_time()
+unsigned long long lwqq_time();
 
 
 

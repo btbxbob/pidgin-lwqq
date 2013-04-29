@@ -24,28 +24,31 @@
 #include "info.h"
 #include "internal.h"
 #include "util.h"
+#include "json.h"
+#include "login.h"
 
 #define LWQQ_MT_BITS  (~((-1)<<8))
 
 static void *start_poll_msg(void *msg_list);
-static void lwqq_recvmsg_poll_msg(struct LwqqRecvMsgList *list);
+static void lwqq_recvmsg_poll_msg(struct LwqqRecvMsgList *list,int flags);
 static void lwqq_recvmsg_poll_close(LwqqRecvMsgList* list);
 static json_t *get_result_json_object(json_t *json);
 static int parse_recvmsg_from_json(LwqqRecvMsgList *list, const char *str);
 
 static int msg_send_back(LwqqHttpRequest* req,void* data);
-static int upload_cface_back(LwqqHttpRequest *req,LwqqClient* lc,LwqqMsgContent* c);
 static int upload_offline_pic_back(LwqqHttpRequest* req,LwqqMsgContent* c,const char* to);
 static int upload_offline_file_back(LwqqHttpRequest* req,void* data);
 static int send_offfile_back(LwqqHttpRequest* req,void* data);
 static void insert_recv_msg_with_order(LwqqRecvMsgList* list,LwqqMsg* msg);
 
-typedef struct LwqqRecvMsgListInternal {
+typedef struct LwqqRecvMsgList_{
     struct LwqqRecvMsgList parent;
-    LwqqAsyncTimer tip_loop;
+    //LwqqAsyncTimer tip_loop;
+    int flags;
+    int last_id2;
     pthread_t tid;
     int on_quit;
-} LwqqRecvMsgListInternal;
+} LwqqRecvMsgList_;
 #define RET_INSERT_MSG 0
 #define RET_DELAY_INS 1
 #define RET_BAD_MSG -1
@@ -186,24 +189,16 @@ static int process_simple_response(LwqqHttpRequest* req)
 {
     //{"retcode":0,"result":{"ret":0}}
     int err = 0;
-    if(req->http_code!=200){
-        err = LWQQ_EC_ERROR;
-        goto done;
-    }
-    lwqq_puts(req->response);
     json_t *root = NULL;
-    if(json_parse_document(&root, req->response)!=JSON_OK){
-        lwqq_log(LOG_ERROR, "Parse json object of add friend error: %s\n", req->response);
-        err = LWQQ_EC_ERROR;
-        goto done;
-    }
+    lwqq__jump_if_http_fail(req,err);
+    lwqq_puts(req->response);
+    lwqq__jump_if_json_fail(root,req->response,err);
     int retcode = s_atoi(json_parse_simple_value(root, "retcode"),LWQQ_EC_ERROR);
     if(retcode != WEBQQ_OK){
         err = retcode;
     }
 done:
-    if(root) json_free_value(&root);
-    lwqq_http_request_free(req);
+    lwqq__clean_json_and_req(root,req);
     return err;
 }
 static int process_msg_list(LwqqHttpRequest* req,char* serv_id,LwqqHistoryMsgList* list)
@@ -266,7 +261,7 @@ static int process_msg_list(LwqqHttpRequest* req,char* serv_id,LwqqHistoryMsgLis
     lwqq_verbose(3,"[online history page:%d,total:%d]\n",list->page,list->total);
     json_t* log;
     lwqq__json_parse_child(root,"chatlogs",log);
-    if(log) log=log->child;
+    if(log) log=log->child_end;
     const char* me = ((LwqqClient*)req->lc)->myself->uin;
     while(log){
         LwqqMsgMessage* msg = (LwqqMsgMessage*)lwqq_msg_new(LWQQ_MS_BUDDY_MSG);
@@ -282,12 +277,63 @@ static int process_msg_list(LwqqHttpRequest* req,char* serv_id,LwqqHistoryMsgLis
         parse_content(log,"msg",msg);
         LwqqRecvMsg* wrapper = s_malloc0(sizeof(*wrapper));
         wrapper->msg = (LwqqMsg*)msg;
-        TAILQ_INSERT_TAIL(&list->msg_list,wrapper,entries);
-        log = log->next;
+        TAILQ_INSERT_HEAD(&list->msg_list,wrapper,entries);
+        log = log->previous;
     }
 done:
+    if(err&&req->response) lwqq_verbose(3,"%s\n",req->response);
     lwqq__clean_json_and_req(root,req);
     return err;
+}
+
+static int process_group_msg_list(LwqqHttpRequest* req,char* unused,LwqqHistoryMsgList* list)
+{
+    //{"retcode":0,"result":{"time":1359526607,"data":{"cl":[{"g":249818602,"cl":[{"u":2501542492,"t":1359449452,"il":[{"v":"1231\n【提示：此用户正在使用Q+ Web：http://web2.qq.com/】","t":0}]}
+#define SET_ERR {\
+        list->begin = list->end = -1;\
+        err = LWQQ_EC_NO_RESULT;\
+        goto done;\
+    }
+    int err = 0;
+    json_t* root = NULL,*result;
+    lwqq__jump_if_http_fail(req,err);
+    lwqq__jump_if_json_fail(root,req->response,err);
+    result = lwqq__parse_retcode_result(root, &err);
+    lwqq__jump_if_retcode_fail(err);
+    if(!result) goto done;
+    lwqq__json_parse_child(result,"data",result);
+    if(!result || result->type == JSON_NULL) SET_ERR;
+    lwqq__json_parse_child(result,"cl",result);
+    if(!result) SET_ERR;
+    result = result->child;
+    list->begin = lwqq__json_get_int(result,"bs",0);
+    list->end = lwqq__json_get_int(result,"es",0);
+    //const char* gid = json_parse_simple_value(result, "g");
+    lwqq__json_parse_child(result,"cl",result);
+    if(!result) SET_ERR;
+    result = result->child;
+    while(result){
+        LwqqMsgMessage* msg = (LwqqMsgMessage*)lwqq_msg_new(LWQQ_MS_GROUP_MSG);
+        msg->super.from = lwqq__json_get_value(result,"u");
+        msg->time = lwqq__json_get_long(result,"t",0);
+        //parse_content(result, "v", msg);
+        LwqqMsgContent* c = s_malloc0(sizeof(*c));
+        c->type = LWQQ_CONTENT_STRING;
+        c->data.str = lwqq__json_get_string(result,"v");
+        TAILQ_INSERT_TAIL(&msg->content,c,entries);
+        LwqqRecvMsg* wrapper = s_malloc0(sizeof(*wrapper));
+        wrapper->msg = (LwqqMsg*)msg;
+        TAILQ_INSERT_TAIL(&list->msg_list,wrapper,entries);
+
+        result = result->next;
+    }
+
+done:
+    //output only error.
+    if(err&&req->response) lwqq_verbose(3,"%s\n",req->response);
+    lwqq__clean_json_and_req(root,req);
+    return err;
+#undef SET_ERR
 }
 /**
  * Create a new LwqqRecvMsgList object
@@ -298,18 +344,19 @@ done:
  */
 LwqqRecvMsgList *lwqq_recvmsg_new(void *client)
 {
-    LwqqRecvMsgList *list;
+    LwqqRecvMsgList_ *list;
 
-    list = s_malloc0(sizeof(LwqqRecvMsgListInternal));
-    list->count = 0;
-    list->poll_flags = POLL_AUTO_REQUEST_PIC&POLL_AUTO_REQUEST_CFACE;
-    list->lc = client;
-    pthread_mutex_init(&list->mutex, NULL);
-    TAILQ_INIT(&list->head);
-    list->poll_msg = lwqq_recvmsg_poll_msg;
-    list->poll_close = lwqq_recvmsg_poll_close;
+    list = s_malloc0(sizeof(LwqqRecvMsgList_));
+    list->parent.count = 0;
+    list->flags = POLL_AUTO_REQUEST_PIC&POLL_AUTO_REQUEST_CFACE;
+    list->last_id2 = 0;
+    list->parent.lc = client;
+    pthread_mutex_init(&list->parent.mutex, NULL);
+    TAILQ_INIT(&list->parent.head);
+    list->parent.poll_msg = lwqq_recvmsg_poll_msg;
+    list->parent.poll_close = lwqq_recvmsg_poll_close;
     
-    return list;
+    return (LwqqRecvMsgList*)list;
 }
 LwqqHistoryMsgList *lwqq_historymsg_list()
 {
@@ -486,7 +533,7 @@ static void msg_sys_g_msg_free(LwqqMsg* msg)
 {
     LwqqMsgSysGMsg* gmsg = (LwqqMsgSysGMsg*)msg;
     if(gmsg){
-        if(gmsg->type == GROUP_LEAVE)
+        if(gmsg->type == GROUP_LEAVE && gmsg->is_myself)
             lwqq_group_free(gmsg->group);
         s_free(gmsg->gcode);
         s_free(gmsg->group_uin);
@@ -743,7 +790,7 @@ static int parse_kick_message(json_t *json,void *opaque)
 static void confirm_friend_request_notify(LwqqClient* lc,LwqqBuddy* buddy)
 {
     LIST_INSERT_HEAD(&lc->friends,buddy,entries);
-    lc->async_opt->request_confirm(lc,buddy);
+    lc->async_opt->new_friend(lc,buddy);
 }*/
 static int parse_system_message(json_t *json,void* opaque,void* _lc)
 {
@@ -827,17 +874,21 @@ static int parse_blist_change(json_t* json,void* opaque,void* _lc)
 static int parse_sys_g_msg(json_t *json,void* opaque,LwqqClient* lc)
 {
     /*group create
-      {"retcode":0,"result":[{"poll_type":"sys_g_msg","value":{"msg_id":39194,"from_uin":1528509098,"to_uin":350512021,"msg_id2":539171,"msg_type":38,"reply_ip":176752410,"type":"group_create","gcode":2676780935,"t_gcode":249818602,"owner_uin":350512021}}]}
+      {"retcode":0,"result":[{"poll_type":"sys_g_msg","value":{"msg_id":39194,"from_uin":1528509098,"to_uin":xxxxxxxxx,"msg_id2":539171,"msg_type":38,"reply_ip":176752410,"type":"group_create","gcode":2676780935,"t_gcode":249818602,"owner_uin":xxxxxxxxx}}]}
 
       group join
       {"retcode":0,"result":[{"poll_type":"sys_g_msg","value":{"msg_id":5940,"from_uin":370154409,"to_uin":2501542492,"msg_id2":979390,"msg_type":33,"reply_ip":176498394,"type":"group_join","gcode":2570026216,"t_gcode":249818602,"op_type":3,"new_member":2501542492,"t_new_member":"","admin_uin":1448380605,"admin_nick":"\u521B\u5EFA\u8005"}}]}
 
       group leave
-      {"retcode":0,"result":[{"poll_type":"sys_g_msg","value":{"msg_id":51488,"from_uin":1528509098,"to_uin":350512021,"msg_id2":180256,"msg_type":34,"reply_ip":176882139,"type":"group_leave","gcode":2676780935,"t_gcode":249818602,"op_type":2,"old_member":574849996,"t_old_member":""}}]}
+      {"retcode":0,"result":[{"poll_type":"sys_g_msg","value":{"msg_id":51488,"from_uin":1528509098,"to_uin":xxxxxxxxx,"msg_id2":180256,"msg_type":34,"reply_ip":176882139,"type":"group_leave","gcode":2676780935,"t_gcode":249818602,"op_type":2,"old_member":574849996,"t_old_member":""}}]}
+      {"poll_type":"sys_g_msg","value""msg_id":14601,"from_uin":529044675,"to_uin":411927578,"msg_id2":563796,"msg_type":34,"reply_ip":176752044,"type":"group_leave","gcode":423970275,"t_gcode":57128682,"op_type":3,"old_member":1096278260,"t_old_member":"","admin_uin":2738646735,"t_admin_uin":"","admin_nick":"\347\256\241\347\220\206\345\221\230"}}
+
       group request
-      {"retcode":0,"result":[{"poll_type":"sys_g_msg","value":{"msg_id":10899,"from_uin":3060007976,"to_uin":350512021,"msg_id2":693883,"msg_type":35,"reply_ip":176752016,"type":"group_request_join","gcode":406247342,"t_gcode":249818602,"request_uin":2297680537,"t_request_uin":"","msg":""}}]}
+      {"retcode":0,"result":[{"poll_type":"sys_g_msg","value":{"msg_id":10899,"from_uin":3060007976,"to_uin":xxxxxxxxx,"msg_id2":693883,"msg_type":35,"reply_ip":176752016,"type":"group_request_join","gcode":406247342,"t_gcode":249818602,"request_uin":2297680537,"t_request_uin":"","msg":""}}]}
+
       group request join agree
       {"retcode":0,"result":[{"poll_type":"sys_g_msg","value":{"msg_id":29407,"from_uin":1735178063,"to_uin":2501542492,"msg_id2":28428,"msg_type":36,"reply_ip":176498075,"type":"group_request_join_agree","gcode":3557387121,"t_gcode":249818602,"admin_uin":4005533729,"msg":""}}]}
+
       group request join deny
       {"retcode":0,"result":[{"poll_type":"sys_g_msg","value":{"msg_id":1253,"from_uin":1735178063,"to_uin":2501542492,"msg_id2":93655,"msg_type":37,"reply_ip":176622059,"type":"group_request_join_deny","gcode":3557387121,"t_gcode":249818602,"admin_uin":4005533729,"msg":"123"}}]}
 
@@ -848,36 +899,51 @@ static int parse_sys_g_msg(json_t *json,void* opaque,LwqqClient* lc)
     msg->gcode = s_strdup(json_parse_simple_value(json,"gcode"));
     msg->account = s_strdup(json_parse_simple_value(json,"t_gcode"));
     int add_new_group = 0;
+    //try to find group in lwqqclient.
+    //it is always well formed when admin receive group message
+    //if it is self receive message .it should be NULL.
+    //and when add_new_group it would be assign to new group .
+    msg->group = lwqq_group_find_group_by_gid(lc,msg->group_uin);
     if(strcmp(type,"group_create")==0)msg->type = GROUP_CREATE;
     else if(strcmp(type,"group_join")==0){
         msg->type = GROUP_JOIN;
         msg->member_uin = s_strdup(json_parse_simple_value(json,"new_member"));
-        msg->member = json_unescape(json_parse_simple_value(json,"t_new_member"));
+        msg->member = lwqq__json_get_string(json,"t_new_member");
         msg->admin_uin = s_strdup(json_parse_simple_value(json,"admin_uin"));
-        msg->admin = json_unescape(json_parse_simple_value(json, "admin_nick"));
-        add_new_group = 1;
+        msg->admin = lwqq__json_get_string(json,"admin_nick");
+        add_new_group = msg->member_uin?strcmp(msg->member_uin,lc->myself->uin)==0:1;
     }
     else if(strcmp(type,"group_leave")==0){
         msg->type = GROUP_LEAVE;
         msg->member_uin = s_strdup(json_parse_simple_value(json,"old_member"));
-        msg->member = json_unescape(json_parse_simple_value(json,"t_old_member"));
-        msg->group = lwqq_group_find_group_by_gid(lc, msg->group_uin);
-        LIST_REMOVE(msg->group,entries);
+        msg->member = lwqq__json_get_string(json,"t_old_member");
+        msg->admin_uin = s_strdup(json_parse_simple_value(json,"admin_uin"));
+        msg->admin = lwqq__json_get_string(json,"admin_nick");
+        msg->is_myself = msg->member_uin?strcmp(lc->myself->uin,msg->member_uin)==0:1;
+        if(msg->is_myself)
+            LIST_REMOVE(msg->group,entries);
     }
     else if(strcmp(type,"group_request_join")==0){
         msg->type = GROUP_REQUEST_JOIN;
         msg->member_uin = s_strdup(json_parse_simple_value(json,"request_uin"));
-        msg->member = json_unescape(json_parse_simple_value(json,"t_request_uin"));
-        msg->msg = json_unescape(json_parse_simple_value(json, "msg"));
+        msg->member = lwqq__json_get_string(json,"t_request_uin");
+        msg->msg = lwqq__json_get_string(json, "msg");
     }else if(strcmp(type,"group_request_join_agree")==0){
         msg->type = GROUP_REQUEST_JOIN_AGREE;
-        add_new_group = 1;
+        msg->member_uin = s_strdup(json_parse_simple_value(json,"new_member"));
+        msg->member = lwqq__json_get_string(json,"t_new_member");
+        add_new_group = msg->member_uin?
+            strcmp(msg->member_uin,lc->myself->uin)==0:
+            1;
     }else if(strcmp(type,"group_request_join_deny")==0){
         msg->type = GROUP_REQUEST_JOIN_DENY;
-        msg->msg = json_unescape(json_parse_simple_value(json, "msg"));
+        msg->msg = lwqq__json_get_string(json, "msg");
+        msg->member_uin = s_strdup(json_parse_simple_value(json,"old_member"));
+        msg->member = lwqq__json_get_string(json,"t_old_member");
     }
     else msg->type = GROUP_UNKNOW;
     if(add_new_group){
+        msg->is_myself = 1;
         LwqqGroup* g = lwqq_group_new(LWQQ_GROUP_QUN);
         g->account = s_strdup(msg->account);
         g->code = s_strdup(msg->gcode);
@@ -951,7 +1017,7 @@ static int parse_notify_offfile(json_t* json,void* opaque)
 {
     /*
      * {"retcode":0,"result":[{"poll_type":"notify_offfile","value":
-     * {"msg_id":9948,"from_uin":495653555,"to_uin":350512021,"msg_id2":460591,"msg_type":9,"reply_ip":178847911,"action":2,"filename":"12.jpg","filesize":137972}}]}
+     * {"msg_id":9948,"from_uin":495653555,"to_uin":xxxxxxxxx,"msg_id2":460591,"msg_type":9,"reply_ip":178847911,"action":2,"filename":"12.jpg","filesize":137972}}]}
     */
     LwqqMsgNotifyOfffile* notify = opaque;
     notify->action = atoi(json_parse_simple_value(json,"action"));
@@ -964,7 +1030,7 @@ static int parse_input_notify(json_t* json,void* opaque)
 {
     /**
      *  {"retcode":0,"result":[{"poll_type":"input_notify","value":
-     *  {"msg_id":21940,"from_uin":3228283951,"to_uin":350512021,"msg_id2":3588813984,"msg_type":121,"reply_ip":4294967295}
+     *  {"msg_id":21940,"from_uin":3228283951,"to_uin":xxxxxxxxx,"msg_id2":3588813984,"msg_type":121,"reply_ip":4294967295}
      *  }]}
      *
      */
@@ -1030,8 +1096,7 @@ static LwqqAsyncEvent* request_content_offpic(LwqqClient* lc,const char* f_uin,L
     char *file_path = url_encode(c->data.img.file_path);
     //there are face 1 to face 10 server to accelerate speed.
     snprintf(url, sizeof(url),
-             "%s/get_offpic2?file_path=%s&f_uin=%s&clientid=%s&psessionid=%s",
-             "http://d.web2.qq.com/channel",
+             WEBQQ_D_HOST"/channel/get_offpic2?file_path=%s&f_uin=%s&clientid=%s&psessionid=%s",
              file_path,f_uin,lc->clientid,lc->psessionid);
     s_free(file_path);
     req = lwqq_http_create_default_request(lc,url, err);
@@ -1039,8 +1104,10 @@ static LwqqAsyncEvent* request_content_offpic(LwqqClient* lc,const char* f_uin,L
         goto done;
     }
     req->set_header(req, "Referer", "http://web2.qq.com/");
-    req->set_header(req,"Host","d.web2.qq.com");
     req->set_header(req, "Cookie", lwqq_get_cookies(lc));
+
+    if(LWQQ_VERBOSE_LEVEL>=4)
+        lwqq_http_set_option(req, LWQQ_HTTP_VERBOSE,1L);
 
     return req->do_request_async(req, 0, NULL,_C_(2p_i,set_content_picture_data,req,c));
 done:
@@ -1066,6 +1133,9 @@ static LwqqAsyncEvent* request_content_cface(LwqqClient* lc,const char* group_co
     req->set_header(req, "Referer", "http://web2.qq.com/");
     req->set_header(req, "Cookie", lwqq_get_cookies(lc));
 
+    if(LWQQ_VERBOSE_LEVEL>=4)
+        lwqq_http_set_option(req, LWQQ_HTTP_VERBOSE,1L);
+
     return req->do_request_async(req,0,NULL,_C_(2p_i,set_content_picture_data,req,c));
 done:
     lwqq_http_request_free(req);
@@ -1079,8 +1149,7 @@ static LwqqAsyncEvent* request_content_cface2(LwqqClient* lc,int msg_id,const ch
     char url[1024];
 /*http://d.web2.qq.com/channel/get_cface2?lcid=3588&guid=85930B6CCE38BDAEF176FA83F0491569.jpg&to=2217604723&count=5&time=1&clientid=6325200&psessionid=8368046764001d636f6e6e7365727665725f77656271714031302e3133342e362e31333800001c9b000000d8026e04009563e4146d0000000a403946423664616232666d00000028ceb438eb76f1bc88360fc303e9148cc5dac8652a7a4bb702ee6dcf9bb10adf571a48b8a76b599e44*/
     snprintf(url, sizeof(url),
-             "%s/channel/get_cface2?lcid=%d&to=%s&guid=%s&count=5&time=1&clientid=%s&psessionid=%s",
-             "http://d.web2.qq.com",
+             WEBQQ_D_HOST"/channel/get_cface2?lcid=%d&to=%s&guid=%s&count=5&time=1&clientid=%s&psessionid=%s",
              msg_id,from_uin,c->data.cface.name,lc->clientid,lc->psessionid);
     req = lwqq_http_create_default_request(lc,url, err);
     lwqq_verbose(3,"%s\n",url);
@@ -1089,6 +1158,9 @@ static LwqqAsyncEvent* request_content_cface2(LwqqClient* lc,int msg_id,const ch
     }
     req->set_header(req, "Referer", "http://web2.qq.com/");
     req->set_header(req, "Cookie", lwqq_get_cookies(lc));
+
+    if(LWQQ_VERBOSE_LEVEL>=4)
+        lwqq_http_set_option(req, LWQQ_HTTP_VERBOSE,1L);
 
     return req->do_request_async(req,0,NULL,_C_(2p_i,set_content_picture_data,req,c));
 done:
@@ -1150,7 +1222,8 @@ static int parse_recvmsg_from_json(LwqqRecvMsgList *list, const char *str)
     s_free(dbg_str);
     
     if (ret != JSON_OK) {
-        lwqq_log(LOG_ERROR, "Parse json object of friends error: %s\n", str);
+        lwqq_log(LOG_ERROR, "Parse recvmsg from json error: %s\n", str);
+        assert(0);
         goto done;
     }
     const char* retcode_str = json_parse_simple_value(json,"retcode");
@@ -1158,10 +1231,9 @@ static int parse_recvmsg_from_json(LwqqRecvMsgList *list, const char *str)
         retcode = atoi(retcode_str);
 
     if(retcode == WEBQQ_NEW_PTVALUE){
-        char * pt = json_parse_simple_value(json, "p");
         LwqqClient* lc = list->lc;
-        s_free(lc->new_ptwebqq);
-        lc->new_ptwebqq = s_strdup(pt);
+        lwqq__override(lc->new_ptwebqq,lwqq__json_get_value(json,"p"));
+        lwqq_verbose(3,"[new ptwebqq:%s]\n",lc->new_ptwebqq);
     }
     if(retcode != WEBQQ_OK) goto done;
 
@@ -1257,6 +1329,7 @@ done:
 
 static void insert_recv_msg_with_order(LwqqRecvMsgList* list,LwqqMsg* msg)
 {
+    LwqqRecvMsgList_* msg_list = (LwqqRecvMsgList_*)list;
     LwqqRecvMsg *rmsg = s_malloc0(sizeof(*rmsg));
     rmsg->msg = msg;
     LwqqRecvMsg *iter;
@@ -1266,24 +1339,36 @@ static void insert_recv_msg_with_order(LwqqRecvMsgList* list,LwqqMsg* msg)
     if((msg->type & LWQQ_MT_BITS) ==  LWQQ_MT_MESSAGE){
         int id2 = ((LwqqMsgSeq*)msg)->msg_id2;
         int inserted = 0;
-        TAILQ_FOREACH_REVERSE(iter,&list->head,RecvMsgListHead,entries){
-            if((iter->msg->type&LWQQ_MT_BITS)!=LWQQ_MT_MESSAGE)
-                continue;
-            LwqqMsgSeq* iter_msg = (LwqqMsgSeq*)iter->msg;
-            if(iter_msg->msg_id2<id2){
-                TAILQ_INSERT_AFTER(&list->head,iter,rmsg,entries);
-                inserted = 1;
-                break;
-            }else if(iter_msg->msg_id2==id2){
-                //this is duplicated message. we destroy it.
-                inserted = 1;
-                lwqq_msg_free(msg);
-                break;
+        if(msg_list->last_id2 == id2 && msg_list->flags & POLL_REMOVE_DUPLICATED_MSG){
+            s_free(rmsg);
+            lwqq_msg_free(msg);
+            inserted = 1;
+        }else{
+            TAILQ_FOREACH_REVERSE(iter,&list->head,RecvMsgListHead,entries){
+                if((iter->msg->type&LWQQ_MT_BITS)!=LWQQ_MT_MESSAGE)
+                    continue;
+                LwqqMsgSeq* iter_msg = (LwqqMsgSeq*)iter->msg;
+                if(iter_msg->msg_id2<id2){
+                    TAILQ_INSERT_AFTER(&list->head,iter,rmsg,entries);
+                    inserted = 1;
+                    break;
+                }else if(iter_msg->msg_id2==id2){
+                    //this is duplicated message. we destroy it.
+                    if(msg_list->flags & POLL_REMOVE_DUPLICATED_MSG){
+                        s_free(rmsg);
+                        lwqq_msg_free(msg);
+                    }else{
+                        TAILQ_INSERT_AFTER(&list->head,iter,rmsg,entries);
+                    }
+                    inserted = 1;
+                    break;
+                }
             }
         }
         if(!inserted){
             TAILQ_INSERT_HEAD(&list->head,rmsg,entries);
         }
+        msg_list->last_id2 = id2;
     }else{
         TAILQ_INSERT_TAIL(&list->head, rmsg, entries);
     }
@@ -1306,6 +1391,7 @@ static int _continue_poll(LwqqHttpRequest* req,void* data)
 
     int retcode;
     if(req->http_code==200){
+        req->response[req->resp_len] = '\0';
         retcode = parse_recvmsg_from_json(list, req->response);
         if(retcode == 121 || retcode == 108){
             lc->async_opt->poll_lost(lc);
@@ -1322,9 +1408,21 @@ static int _continue_poll(LwqqHttpRequest* req,void* data)
 
 static int poll_progress(void * data,size_t now,size_t total)
 {
-    LwqqRecvMsgListInternal* list = data;
+    LwqqRecvMsgList_* list = data;
     return list->on_quit;
 }
+
+void check_connection_lost(LwqqAsyncEvent* ev)
+{
+    LwqqClient* lc = ev->lc;
+    if(ev->result == LWQQ_EC_OK){
+        LwqqRecvMsgList_* msg_list = (LwqqRecvMsgList_*)lc->msg_list;
+        lwqq_recvmsg_poll_msg(lc->msg_list, msg_list->flags);
+    }else{
+        lc->async_opt->poll_lost(lc);
+    }
+}
+
 /**
  * Poll to receive message.
  * 
@@ -1351,17 +1449,18 @@ static void *start_poll_msg(void *msg_list)
 
     /* Create a POST request */
     char url[512];
-    snprintf(url, sizeof(url), "%s/channel/poll2", "http://d.web2.qq.com");
+    snprintf(url, sizeof(url), WEBQQ_D_HOST"/channel/poll2");
     req = lwqq_http_create_default_request(lc,url, NULL);
     if (!req) {
         goto failed;
     }
-    req->set_header(req, "Referer", "http://d.web2.qq.com/proxy.html?v=20101025002");
+    req->set_header(req, "Referer", WEBQQ_D_REF_URL);
     req->set_header(req, "Content-Transfer-Encoding", "binary");
     req->set_header(req, "Content-type", "application/x-www-form-urlencoded");
     req->set_header(req, "Cookie", lwqq_get_cookies(lc));
     //long poll timeout is 90s.official value
     lwqq_http_set_option(req, LWQQ_HTTP_TIMEOUT,90);
+    //lwqq_http_set_option(req, LWQQ_HTTP_VERBOSE,1);
 
 #if USE_MSG_THREAD
     int retcode;
@@ -1369,16 +1468,18 @@ static void *start_poll_msg(void *msg_list)
     lwqq_http_on_progress(req, poll_progress, list);
     while(1) {
         ret = req->do_request(req, 1, msg);
-        if(ret != 0){
-            lwqq_verbose(2,"poll_msg:err:%d\n",ret);
-        }
         if(!lwqq_client_logined(lc)) break;
-        if(ret == LWQQ_EC_TIMEOUT_OVER){
-            lc->dispatch(vp_func_p,(CALLBACK_FUNC)lc->async_opt->poll_lost,lc);
+        if(ret != LWQQ_EC_OK){
+            /*lc->dispatch(vp_func_p,(CALLBACK_FUNC)lc->async_opt->poll_lost,lc);
+            break;*/
+            //some thing is wrong. try relogin first. 
+            LwqqAsyncEvent* ev = lwqq_relogin(lc);
+            lwqq_async_add_event_listener(ev, _C_(p,check_connection_lost,ev));
             break;
         }
 
         if (ret || req->http_code != 200) continue;
+        req->response[req->resp_len] = '\0';
         retcode = parse_recvmsg_from_json(list, req->response);
         if(!lwqq_client_logined(lc)) break;
         switch(retcode){
@@ -1394,6 +1495,7 @@ static void *start_poll_msg(void *msg_list)
                 break;
             case WEBQQ_NEW_PTVALUE:
                 //just need do some things when relogin
+                //lwqq_set_cookie(lc->cookies, "ptwebqq", lc->new_ptwebqq);
                 break;
         }
     }
@@ -1413,10 +1515,11 @@ failed:
 #endif
 }
 
-static void lwqq_recvmsg_poll_msg(LwqqRecvMsgList *list)
+static void lwqq_recvmsg_poll_msg(LwqqRecvMsgList *list,int flags)
 {
+    LwqqRecvMsgList_* internal = (LwqqRecvMsgList_*)list;
+    internal->flags = flags;
 #if USE_MSG_THREAD
-    LwqqRecvMsgListInternal* internal = (LwqqRecvMsgListInternal*)list;
 
     pthread_create(&internal->tid, NULL/*&list->attr*/, start_poll_msg, list);
 #else
@@ -1427,7 +1530,7 @@ static void lwqq_recvmsg_poll_msg(LwqqRecvMsgList *list)
 static void lwqq_recvmsg_poll_close(LwqqRecvMsgList* list)
 {
     if(!list) return;
-    LwqqRecvMsgListInternal* internal = (LwqqRecvMsgListInternal*)list;
+    LwqqRecvMsgList_* internal = (LwqqRecvMsgList_*)list;
     if(internal->tid == 0) return;
     internal->on_quit = 1;
     pthread_join(internal->tid,NULL);
@@ -1496,13 +1599,15 @@ static char* content_parse_string(LwqqMsgMessage* msg,int msg_type,int *has_cfac
                 break;
             case LWQQ_CONTENT_CFACE:
                 //[\"cface\",\"group\",\"0C3AED06704CA9381EDCC20B7F552802.jPg\"]
-                if(msg_type == LWQQ_MS_GROUP_MSG)
-                    format_append(buf,"["KEY("cface")","KEY("group")","KEY("%s")"],",
-                            c->data.cface.name);
-                else if(msg_type == LWQQ_MS_BUDDY_MSG || msg_type == LWQQ_MS_SESS_MSG)
-                    format_append(buf,"["KEY("cface")","KEY("%s")"],",
-                            c->data.cface.name);
-                *has_cface = 1;
+                if(c->data.cface.name){
+                    if(msg_type == LWQQ_MS_GROUP_MSG)
+                        format_append(buf,"["KEY("cface")","KEY("group")","KEY("%s")"],",
+                                c->data.cface.name);
+                    else if(msg_type == LWQQ_MS_BUDDY_MSG || msg_type == LWQQ_MS_SESS_MSG)
+                        format_append(buf,"["KEY("cface")","KEY("%s")"],",
+                                c->data.cface.name);
+                    *has_cface = 1;
+                }
                 break;
             case LWQQ_CONTENT_STRING:
                 strcat(buf,LEFT);
@@ -1546,6 +1651,9 @@ static LwqqAsyncEvent* lwqq_msg_upload_offline_pic(
     req->set_header(req,"Referer","http://web2.qq.com/");
     req->set_header(req, "Cookie", lwqq_get_cookies(lc));
     req->set_header(req,"Cache-Control","max-age=0");
+
+    if(LWQQ_VERBOSE_LEVEL>=4)
+        lwqq_http_set_option(req, LWQQ_HTTP_VERBOSE,1L);
 
     req->add_form(req,LWQQ_FORM_CONTENT,"callback","parent.EQQ.Model.ChatMsg.callbackSendPic");
     req->add_form(req,LWQQ_FORM_CONTENT,"locallangid","2052");
@@ -1625,47 +1733,7 @@ static LwqqAsyncEvent* query_gface_sig(LwqqClient* lc)
     return req->do_request_async(req,0,NULL,_C_(p,process_gface_sig,req));
 }
 
-static LwqqAsyncEvent* lwqq_msg_upload_cface(
-        LwqqClient* lc,LwqqMsgContent* c,LwqqMsgType type)
-{
-    if(c->type != LWQQ_CONTENT_CFACE) return NULL;
-    if(!c->data.cface.name || !c->data.cface.data || !c->data.cface.size) return NULL;
-    const char *filename = c->data.cface.name;
-    const char *buffer = c->data.cface.data;
-    size_t size = c->data.cface.size;
-    LwqqHttpRequest *req;
-    LwqqErrorCode err;
-    char url[512];
-    static int fileid = 1;
-    char fileid_str[20];
-
-    snprintf(url,sizeof(url),"http://up.web2.qq.com/cgi-bin/cface_upload?time=%ld",
-            time(NULL));
-    req = lwqq_http_create_default_request(lc,url,&err);
-    //curl_easy_setopt(req->req,CURLOPT_VERBOSE,1);
-    req->set_header(req,"Origin","http://web2.qq.com");
-    req->set_header(req,"Referer","http://web2.qq.com/");
-    req->set_header(req, "Cookie", lwqq_get_cookies(lc));
-
-    req->add_form(req,LWQQ_FORM_CONTENT,"vfwebqq",lc->vfwebqq);
-    //this is special for group msg.it can upload over 250K
-    req->add_form(req,LWQQ_FORM_CONTENT,"from","control");
-    if(type == LWQQ_MS_GROUP_MSG){
-        req->add_form(req,LWQQ_FORM_CONTENT,"f","EQQ.Model.ChatMsg.callbackSendPicGroup");
-    } else if(type == LWQQ_MS_BUDDY_MSG){
-        req->add_form(req,LWQQ_FORM_CONTENT,"f","EQQ.Model.ChatMsg.callbackSendPic");
-    }
-    req->add_file_content(req,"custom_face",filename,buffer,size,NULL);
-    snprintf(fileid_str,sizeof(fileid_str),"%d",fileid++);
-    //cface 上传是会占用自定义表情的空间的.这里的fileid是几就是占用第几个格子.
-    req->add_form(req,LWQQ_FORM_CONTENT,"fileid","1");
-
-    /*void **data = s_malloc0(sizeof(void*)*2);
-    data[0] = lc;
-    data[1] = c;*/
-    return req->do_request_async(req,0,NULL,_C_(3p_i,upload_cface_back,req,lc,c));
-}
-static int upload_cface_back(LwqqHttpRequest *req,LwqqClient* lc,LwqqMsgContent* c)
+static int upload_cface_back(LwqqHttpRequest *req,LwqqMsgContent* c,const char* to)
 {
     int ret;
     int errno = 0;
@@ -1694,13 +1762,61 @@ static int upload_cface_back(LwqqHttpRequest *req,LwqqClient* lc,LwqqMsgContent*
         *pos = '\0';
     }
     s_free(c->data.cface.name);
-    s_free(c->data.cface.data);
     c->data.cface.name = s_strdup(file);
-    c->data.cface.size = 0;
 
 done:
+    if(errno){
+        LwqqClient* lc = req->lc;
+        lc->async_opt->upload_fail(lc,to,c);
+        s_free(c->data.cface.name);
+    }
+    s_free(c->data.cface.data);
+    c->data.cface.size = 0;
     lwqq_http_request_free(req);
     return errno;
+}
+static LwqqAsyncEvent* lwqq_msg_upload_cface(
+        LwqqClient* lc,LwqqMsgContent* c,LwqqMsgType type,const char* to)
+{
+    if(c->type != LWQQ_CONTENT_CFACE) return NULL;
+    if(!c->data.cface.name || !c->data.cface.data || !c->data.cface.size) return NULL;
+    const char *filename = c->data.cface.name;
+    const char *buffer = c->data.cface.data;
+    size_t size = c->data.cface.size;
+    LwqqHttpRequest *req;
+    LwqqErrorCode err;
+    char url[512];
+    static int fileid = 1;
+    char fileid_str[20];
+
+    snprintf(url,sizeof(url),"http://up.web2.qq.com/cgi-bin/cface_upload?time=%ld",
+            time(NULL));
+    req = lwqq_http_create_default_request(lc,url,&err);
+    //curl_easy_setopt(req->req,CURLOPT_VERBOSE,1);
+    req->set_header(req,"Origin","http://web2.qq.com");
+    req->set_header(req,"Referer","http://web2.qq.com/");
+    req->set_header(req, "Cookie", lwqq_get_cookies(lc));
+
+    if(LWQQ_VERBOSE_LEVEL>=4)
+        lwqq_http_set_option(req, LWQQ_HTTP_VERBOSE,1L);
+
+    req->add_form(req,LWQQ_FORM_CONTENT,"vfwebqq",lc->vfwebqq);
+    //this is special for group msg.it can upload over 250K
+    req->add_form(req,LWQQ_FORM_CONTENT,"from","control");
+    if(type == LWQQ_MS_GROUP_MSG){
+        req->add_form(req,LWQQ_FORM_CONTENT,"f","EQQ.Model.ChatMsg.callbackSendPicGroup");
+    } else if(type == LWQQ_MS_BUDDY_MSG){
+        req->add_form(req,LWQQ_FORM_CONTENT,"f","EQQ.Model.ChatMsg.callbackSendPic");
+    }
+    req->add_file_content(req,"custom_face",filename,buffer,size,NULL);
+    snprintf(fileid_str,sizeof(fileid_str),"%d",fileid++);
+    //cface 上传是会占用自定义表情的空间的.这里的fileid是几就是占用第几个格子.
+    req->add_form(req,LWQQ_FORM_CONTENT,"fileid","1");
+
+    /*void **data = s_malloc0(sizeof(void*)*2);
+    data[0] = lc;
+    data[1] = c;*/
+    return req->do_request_async(req,0,NULL,_C_(3p_i,upload_cface_back,req,c,to));
 }
 
 void lwqq_msg_send_continue(LwqqClient* lc,LwqqMsgMessage* msg,LwqqAsyncEvent* event)
@@ -1725,7 +1841,7 @@ LwqqAsyncEvent* lwqq_msg_send(LwqqClient *lc, LwqqMsgMessage *msg)
     char data[8192];
     data[0] = '\0';
     LwqqMsgMessage *mmsg = msg;
-    const char *apistr;
+    const char *apistr = NULL;
     int has_cface = 0;
 
 
@@ -1737,7 +1853,8 @@ LwqqAsyncEvent* lwqq_msg_send(LwqqClient *lc, LwqqMsgMessage *msg)
     TAILQ_FOREACH(c,&mmsg->content,entries){
         event = NULL;
         if(c->type == LWQQ_CONTENT_CFACE && c->data.cface.data > 0){
-            event = lwqq_msg_upload_cface(lc,c,mmsg->super.super.type);
+            event = lwqq_msg_upload_cface(lc,c,mmsg->super.super.type,
+                    mmsg->super.to);
             if(!lc->gface_sig) lwqq_async_evset_add_event(evset,query_gface_sig(lc));
         } else if(c->type == LWQQ_CONTENT_OFFPIC && c->data.img.data > 0)
             event = lwqq_msg_upload_offline_pic(lc,c,mmsg->super.to);
@@ -1774,6 +1891,10 @@ LwqqAsyncEvent* lwqq_msg_send(LwqqClient *lc, LwqqMsgMessage *msg)
     }else if(msg->super.super.type == LWQQ_MS_DISCU_MSG){
         format_append(data,"\"did\":\"%s\",",mmsg->discu.did);
         apistr = "send_discu_msg2";
+    }else{
+        //this would never come.
+        assert(0);
+        return NULL;
     }
     format_append(data,
             //"\"face\":0,"
@@ -1782,18 +1903,18 @@ LwqqAsyncEvent* lwqq_msg_send(LwqqClient *lc, LwqqMsgMessage *msg)
             "\"clientid\":\"%s\","
             "\"psessionid\":\"%s\"}",
             content,lc->msg_id,lc->clientid,lc->psessionid);
-    format_append(data,"&clientid=%s&psessionid=%s",lc->clientid,lc->psessionid);
+    //format_append(data,"&clientid=%s&psessionid=%s",lc->clientid,lc->psessionid);
     if(strlen(data)+1==sizeof(data)) return NULL;
     lwqq_verbose(3,"%s\n",data);
 
     /* Create a POST request */
     char url[512];
-    snprintf(url, sizeof(url), "%s/channel/%s", "http://d.web2.qq.com",apistr);
+    snprintf(url, sizeof(url), WEBQQ_D_HOST"/channel/%s", apistr);
     req = lwqq_http_create_default_request(lc,url, NULL);
     if (!req) {
         goto failed;
     }
-    req->set_header(req, "Referer", "http://d.web2.qq.com/proxy.html?v=20101025002");
+    req->set_header(req, "Referer", WEBQQ_D_REF_URL);
     req->set_header(req, "Content-Transfer-Encoding", "binary");
     req->set_header(req, "Content-type", "application/x-www-form-urlencoded");
     req->set_header(req, "Cookie", lwqq_get_cookies(lc));
@@ -1806,14 +1927,16 @@ failed:
 }
 static int msg_send_back(LwqqHttpRequest* req,void* data)
 {
-    if (req == LWQQ_CALLBACK_FAILED ) return -1;
     json_t *root = NULL;
     int ret;
     int errno = 0;
+
+    if(req->failcode>0) {errno = 1;goto failed;}
     if (req->http_code != 200) {
         errno = 1;
         goto failed;
     }
+
     lwqq_verbose(3,"%s\n",req->response);
 
     //we check result if ok return 1,fail return 0;
@@ -1921,7 +2044,7 @@ LwqqAsyncEvent* lwqq_msg_accept_file(LwqqClient* lc,LwqqMsgFileMessage* msg,cons
     char url[512];
     //char* gbk = to_gbk(msg->recv.name);
     char* name = url_encode(msg->recv.name);
-    snprintf(url,sizeof(url),"http://d.web2.qq.com/channel/get_file2?"
+    snprintf(url,sizeof(url),WEBQQ_D_HOST"/channel/get_file2?"
             "lcid=%d&guid=%s&to=%s&psessionid=%s&count=1&time=%ld&clientid=%s",
             msg->session_id,name,msg->super.from,lc->psessionid,time(NULL),lc->clientid);
     s_free(name);
@@ -1929,8 +2052,7 @@ LwqqAsyncEvent* lwqq_msg_accept_file(LwqqClient* lc,LwqqMsgFileMessage* msg,cons
     lwqq_verbose(3,"%s\n",url);
     LwqqHttpRequest* req = lwqq_http_create_default_request(lc,url,NULL);
     req->set_header(req, "Cookie", lwqq_get_cookies(lc));
-    req->set_header(req,"Referer","http://d.web2.qq.com/proxy.html?v=20110331002&id=4");
-    //req->set_header(req,"Referer","http://web2.qq.com/");
+    req->set_header(req,"Referer",WEBQQ_D_REF_URL);
     //followlocation by hand
     //because curl doesn't escape url after auto follow;
     //lwqq_http_not_follow(req);
@@ -1945,20 +2067,20 @@ LwqqAsyncEvent* lwqq_msg_accept_file(LwqqClient* lc,LwqqMsgFileMessage* msg,cons
 LwqqAsyncEvent* lwqq_msg_refuse_file(LwqqClient* lc,LwqqMsgFileMessage* file)
 {
     char url[512];
-    snprintf(url,sizeof(url),"http://d.web2.qq.com/channel/refuse_file2?"
+    snprintf(url,sizeof(url),WEBQQ_D_HOST"/channel/refuse_file2?"
             "lcid=%d&to=%s&psessionid=%s&count=1&time=%ld&clientid=%s",
             file->session_id,file->super.from,lc->psessionid,time(NULL),lc->clientid);
     lwqq_verbose(3,"%s\n",url);
     LwqqHttpRequest* req = lwqq_http_create_default_request(lc,url,NULL);
     req->set_header(req, "Cookie", lwqq_get_cookies(lc));
-    req->set_header(req,"Referer","http://d.web2.qq.com/proxy.html?v=20110331002&id=4");
+    req->set_header(req,"Referer",WEBQQ_D_REF_URL);
     return req->do_request_async(req,0,NULL,_C_(p_i,process_simple_response,req));
 }
 
-LwqqAsyncEvent* lwqq_msg_upload_offline_file(LwqqClient* lc,LwqqMsgOffFile* file)
+LwqqAsyncEvent* lwqq_msg_upload_offline_file(LwqqClient* lc,LwqqMsgOffFile* file,int flags)
 {
     char url[512];
-    snprintf(url,sizeof(url),"http://weboffline.ftn.qq.com/ftn_access/upload_offline_file?time=%ld",time(NULL));
+    snprintf(url,sizeof(url),"http://weboffline.ftn.qq.com/ftn_access/upload_offline_file?time=%llu",LTIME);
     LwqqHttpRequest* req = lwqq_http_create_default_request(lc,url,NULL);
     req->set_header(req, "Cookie", lwqq_get_cookies(lc));
     req->set_header(req,"Referer","http://web2.qq.com/");
@@ -1967,7 +2089,11 @@ LwqqAsyncEvent* lwqq_msg_upload_offline_file(LwqqClient* lc,LwqqMsgOffFile* file
 
     //some server didn't response this.
     //such as cache server
-    req->set_header(req,"Expect","");
+    if(flags & DONT_EXPECTED_100_CONTINUE)
+        req->set_header(req,"Expect","");
+
+    if(LWQQ_VERBOSE_LEVEL>=4)
+        lwqq_http_set_option(req, LWQQ_HTTP_VERBOSE,1L);
 
     req->add_form(req,LWQQ_FORM_CONTENT,"callback","parent.EQQ.Model.ChatMsg.callbackSendOffFile");
     req->add_form(req,LWQQ_FORM_CONTENT,"locallangid","2052");
@@ -2020,10 +2146,10 @@ LwqqAsyncEvent* lwqq_msg_send_offfile(LwqqClient* lc,LwqqMsgOffFile* file)
 {
     char url[512];
     char post[512];
-    snprintf(url,sizeof(url),"http://d.web2.qq.com/channel/send_offfile2");
+    snprintf(url,sizeof(url),WEBQQ_D_HOST"/channel/send_offfile2");
     LwqqHttpRequest* req = lwqq_http_create_default_request(lc,url,NULL);
     req->set_header(req, "Cookie", lwqq_get_cookies(lc));
-    req->set_header(req,"Referer","http://d.web2.qq.com/proxy.html?v=20110331002&id=3");
+    req->set_header(req,"Referer",WEBQQ_D_REF_URL);
     snprintf(post,sizeof(post),"r={\"to\":\"%s\",\"file_path\":\"%s\","
             "\"filename\":\"%s\",\"to_uin\":\"%s\","
             "\"clientid\":\"%s\",\"psessionid\":\"%s\"}&"
@@ -2112,12 +2238,12 @@ LwqqAsyncEvent* lwqq_msg_input_notify(LwqqClient* lc,const char* serv_id)
 {
     if(!lc || !serv_id) return NULL;
     char url[512];
-    snprintf(url,sizeof(url),"http://d.web2.qq.com/channel/input_notify2?to_uin=%s&clientid=%s&psessionid=%s&t=%ld",
+    snprintf(url,sizeof(url),WEBQQ_D_HOST"/channel/input_notify2?to_uin=%s&clientid=%s&psessionid=%s&t=%ld",
             serv_id,lc->clientid,lc->psessionid,time(NULL)
             );
     lwqq_verbose(3,"%s\n",url);
     LwqqHttpRequest* req = lwqq_http_create_default_request(lc,url,NULL);
-    req->set_header(req,"Referer","http://d.web2.qq.com/proxy.html?v=20110331002&id=2");
+    req->set_header(req,"Referer",WEBQQ_D_REF_URL);
     return req->do_request_async(req,0,NULL,_C_(p_i,process_simple_response,req));
 }
 
@@ -2125,17 +2251,17 @@ LwqqAsyncEvent* lwqq_msg_shake_window(LwqqClient* lc,const char* serv_id)
 {
     if(!lc || !serv_id) return NULL;
     char url[512];
-    snprintf(url,sizeof(url),"http://d.web2.qq.com/channel/shake2?to_uin=%s&clientid=%s&psessionid=%s&t=%ld",
+    snprintf(url,sizeof(url),WEBQQ_D_HOST"/channel/shake2?to_uin=%s&clientid=%s&psessionid=%s&t=%ld",
             serv_id,lc->clientid,lc->psessionid,time(NULL));
     lwqq_verbose(3,"%s\n",url);
     LwqqHttpRequest* req = lwqq_http_create_default_request(lc, url, NULL);
-    req->set_header(req,"Referer","http://d.web2.qq.com/proxy.html?v=20110331002&id=2");
+    req->set_header(req,"Referer",WEBQQ_D_REF_URL);
     return req->do_request_async(req,0,NULL,_C_(p_i,process_simple_response,req));
 }
 
 LwqqAsyncEvent* lwqq_msg_friend_history(LwqqClient* lc,const char* serv_id,LwqqHistoryMsgList* list)
 {
-    if(!lc||!serv_id) return NULL;
+    if(!lc||!serv_id||!list) return NULL;
     char url[512];
     snprintf(url,sizeof(url),"http://web2.qq.com/cgi-bin/webqq_chat/?cmd=1&tuin=%s&vfwebqq=%s&page=%d&row=%d&callback=alloy.app.chatLogViewer.renderChatLog&t=%ld",serv_id,lc->vfwebqq,list->page,list->row,time(NULL));
     LwqqHttpRequest* req = lwqq_http_create_default_request(lc, url, NULL);
@@ -2143,6 +2269,19 @@ LwqqAsyncEvent* lwqq_msg_friend_history(LwqqClient* lc,const char* serv_id,LwqqH
     req->set_header(req,"Cookie",lwqq_get_cookies(lc));
     lwqq_verbose(3,"%s\n",url);
     return req->do_request_async(req,0,NULL,_C_(3p,process_msg_list,req,s_strdup(serv_id),list));
+}
+
+LwqqAsyncEvent* lwqq_msg_group_history(LwqqClient* lc,LwqqGroup* g,LwqqHistoryMsgList* list)
+{
+    if(!lc||!g||!list) return NULL;
+    char url[512];
+    snprintf(url,sizeof(url),"http://cgi.web2.qq.com/keycgi/top/groupchatlog?ps=%d&bs=%d&es=%d&gid=%s&mode=1&vfwebqq=%s&t=%ld",
+            list->row,list->begin,list->end,g->code,lc->vfwebqq,time(NULL));
+    LwqqHttpRequest* req = lwqq_http_create_default_request(lc, url, NULL);
+    req->set_header(req,"Referer","http://cgi.web2.qq.com/proxy.html?v=20110412001&id=2");
+    req->set_header(req,"Cookie",lwqq_get_cookies(lc));
+    lwqq_verbose(3,"%s\n",url);
+    return req->do_request_async(req,0,NULL,_C_(3p,process_group_msg_list,req,NULL,list));
 }
 
 #if 0
